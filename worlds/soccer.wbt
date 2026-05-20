@@ -6,6 +6,15 @@ EXTERNPROTO "../protos/Viper.proto"
 WorldInfo {
   basicTimeStep 8
   coordinateSystem "NUE"
+  contactProperties [
+    ContactProperties {
+      material1 "wheel"
+      coulombFriction [
+        0.8
+      ]
+      softCFM 0.0001
+    }
+  ]
 }
 Viewpoint {
   orientation 0.586623603791758 -0.702639550859726 -0.40270387264342655 3.3651403075038715
