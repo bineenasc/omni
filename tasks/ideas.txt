@@ -1,0 +1,56 @@
+Curr goal: robot can move boll/control it and score
+
+
+Por lidar no robo
+
+class CNNFeaturExtractor -> 
+- receives input from Robot’s lidar and encodes it to fewer features (basally just a CNN part to reduce feature input so robot does not consider each lidar point individually)
+
+class GeneralSupervisor -> 
+Uses from controller import Supervisor
+- has initial positions of abb and orobots (hw they start the match)
+- can see everything, given a robot’s id returns: ball {distance, vector}; goal {distance, vector}; (later also comrades and enemies list and position); 
+- controls time
+- it will later also be responsible for controlling how many robots are on the field;
+- reset_world (resets everything to start new simulation)
+- reset_positions (resets positions of ball and robots)
+- if ball or robots are off field brings them back;
+- if ball inside goal (restarts positions of ball & robots)
+- step_simulation
+
+class RobotState -> (internal robot state not much but keeps stuff clean)
+- Has access to lidar info(stores the currently observed np.array)
+- Previous action
+- current observations
+- …
+
+class RobotAgent or RLAgent ->  for each individual robot
+Where the robot ‘learns’
+- convert observations
+- choose actions
+- execute movement
+- interface with PPO
+
+- — FUNCS — 
+- get_observation (returns vector used by PPO)
+- apply_action (robots movement - where to?)
+- ball_colision
+- get_reward (will call and weigh different rewards)
+- reset_preference (every new simulation where we wanna reset knowledge)
+
+Model used to train (RL) -> PPO
+
+```bash
+GeneralSupervisor
+    ↓
+FootballEnvironment (Gym-style env)
+    ↓
+RobotAgent
+    ↓
+Policy Network (PPO)
+```
+
+
+
+
+
