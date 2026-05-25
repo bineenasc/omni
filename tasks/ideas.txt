@@ -7,7 +7,7 @@ class CNNFeaturExtractor ->
 - receives input from Robot’s lidar and encodes it to fewer features (basally just a CNN part to reduce feature input so robot does not consider each lidar point individually)
 
 class GeneralSupervisor -> 
-Uses from controller import Supervisor
+Uses from controller import Supervisor; simulation/world manager
 - has initial positions of abb and orobots (hw they start the match)
 - can see everything, given a robot’s id returns: ball {distance, vector}; goal {distance, vector}; (later also comrades and enemies list and position); 
 - controls time
@@ -17,6 +17,15 @@ Uses from controller import Supervisor
 - if ball or robots are off field brings them back;
 - if ball inside goal (restarts positions of ball & robots)
 - step_simulation
+
+class FootballEnvironment ->
+RL interface; Presents the simulation as an RL environment for PPO
+- starts new episodes
+- step(action)
+- sends action to robot
+- advances simulation
+- computes reward
+- returns observation
 
 class RobotState -> (internal robot state not much but keeps stuff clean)
 - Has access to lidar info(stores the currently observed np.array)
