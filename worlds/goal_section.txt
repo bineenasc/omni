@@ -1,114 +1,4 @@
-#VRML_SIM R2025a utf8
-
-EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
-IMPORTABLE EXTERNPROTO "../protos/Viper.proto"
-IMPORTABLE EXTERNPROTO "../protos/Titan.proto"
-
-WorldInfo {
-  basicTimeStep 8
-  coordinateSystem "NUE"
-  contactProperties [
-    ContactProperties {
-      material1 "wheel"
-      coulombFriction [
-        0.8
-      ]
-      softCFM 0.0001
-    }
-  ]
-}
-Viewpoint {
-  orientation 0.586623603791758 -0.702639550859726 -0.40270387264342655 3.3651403075038715
-  position 0.4745857339268311 1.6589747852058472 1.3190694607801228
-  followType "None"
-}
-TexturedBackgroundLight {
-  texture "noon_cloudy_countryside"
-}
-DirectionalLight {
-  direction 0 0 1
-}
-DEF Arena Group {
-  children [
-    DEF delimitadores Group {
-      children [
-        Solid {
-          translation 1.42931 0.15 -2.17189
-          rotation 0 -1 0 -0.7854053071795866
-          name "solid(9)"
-          boundingObject Box {
-            size 0.1 0.3 1.2
-          }
-          locked TRUE
-        }
-        Solid {
-          translation -1.42738 0.15 -2.18603
-          rotation 0 1 0 2.3562
-          name "solid(8)"
-          boundingObject Box {
-            size 0.1 0.3 1.2
-          }
-          locked TRUE
-        }
-        Solid {
-          translation -1.43445 0.15 2.17674
-          rotation 0 -1 0 -0.7854053071795866
-          name "solid(7)"
-          boundingObject Box {
-            size 0.1 0.3 1.2
-          }
-          locked TRUE
-        }
-        Solid {
-          translation 1.42929 0.15 2.18381
-          rotation 0 1 0 2.3562
-          name "solid(6)"
-          boundingObject Box {
-            size 0.1 0.3 1.2
-          }
-          locked TRUE
-        }
-        Solid {
-          translation -1 0.15 2.33
-          rotation 0 1 0 1.5708
-          name "solid(4)"
-          boundingObject Box {
-            size 0.1 0.3 1.25
-          }
-          locked TRUE
-        }
-        Solid {
-          translation -1 0.15 -2.33
-          rotation 0 1 0 1.5708
-          name "solid(2)"
-          boundingObject Box {
-            size 0.1 0.3 1.25
-          }
-          locked TRUE
-        }
-        Solid {
-          translation 1 0.155 2.33
-          rotation 0 1 0 1.5708
-          name "solid(3)"
-          boundingObject Box {
-            size 0.1 0.3 1.25
-          }
-          locked TRUE
-        }
-        Solid {
-          translation 1 0.15 -2.33
-          rotation 0 1 0 1.5708
-          name "solid(1)"
-          boundingObject Box {
-            size 0.1 0.3 1.25
-          }
-          locked TRUE
-        }
-        Solid {
-          translation -1.625 0.15 0
-          name "solid(5)"
-          boundingObject Box {
-            size 0.1 0.3 4.7
+﻿            size 0.1 0.3 4.7
           }
           locked TRUE
         }
@@ -122,7 +12,7 @@ DEF Arena Group {
       ]
     }
     DEF gol_E Solid {
-      translation 0 0 4.55
+      translation 0 0 4
       rotation 0 1 0 3.14159
       children [
         DEF shape_g1 Shape {
@@ -159,7 +49,7 @@ DEF Arena Group {
       locked TRUE
     }
     DEF gol_D Solid {
-      translation 0 0 -4.55
+      translation 0 0 -4
       children [
         DEF shape_g2 Shape {
           appearance PBRAppearance {
@@ -228,90 +118,3 @@ DEF Arena Group {
             }
           ]
         }
-        DEF tampo Pose {
-          translation 0 -0.01 0
-          children [
-            Shape {
-              appearance PBRAppearance {
-                baseColor 0.05098 0.615686 0.05098
-                roughness 1
-                metalness 0
-                name "13,157,13"
-              }
-              geometry Box {
-                size 7.4 0.02 10.4
-              }
-            }
-          ]
-        }
-      ]
-      name "Campo.obj"
-      boundingObject Pose {
-        translation 0 -0.01 0
-        children [
-          Box {
-            size 7.4 0.02 10.4
-          }
-        ]
-      }
-      locked TRUE
-    }
-  ]
-}
-DEF BOLA Solid {
-  translation 0 0.024989208999989312 0
-  children [
-    Connector {
-      model "magnet"
-      type "passive"
-      autoLock TRUE
-      axisTolerance 3.14
-      rotationTolerance 3.14
-      snap FALSE
-      tensileStrength 15
-      shearStrength 18
-    }
-    DEF BALL_SHAPE Shape {
-      appearance PBRAppearance {
-        baseColor 1 0.54 0.08
-        roughness 0.3
-        metalness 0
-      }
-      geometry Sphere {
-        radius 0.025
-        subdivision 4
-      }
-    }
-  ]
-  name "ball"
-  model "ball"
-  boundingObject USE BALL_SHAPE
-  physics Physics {
-    density -1
-    mass 0.055
-    centerOfMass [
-      0 0 0
-    ]
-    damping Damping {
-      linear 0.17
-      angular 0.33
-    }
-  }
-}
-DEF VIPER Viper {
-  rotation 1 0 0 -1.5707953071795862
-}
-Robot {
-  supervisor TRUE
-  controller "soccer_supervisor"
-  children [
-    Emitter {
-      name "supervisor_emitter"
-      channel 0
-    }
-    Receiver {
-      name "supervisor_receiver"
-      channel 1
-    }
-  ]
-}
