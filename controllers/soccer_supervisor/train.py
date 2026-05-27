@@ -65,6 +65,7 @@ _HERE     = os.path.dirname(os.path.abspath(__file__))
 _CKPT_DIR = os.path.join(_HERE, "checkpoints")
 _LOG_DIR  = os.path.join(_HERE, "logs")
 _PLOT_DIR = os.path.join(_HERE, "plots")
+VECNORM_PATH = os.path.join(_CKPT_DIR, "final_model_vecnorm.pkl")
 
 
 # ── Main training function ────────────────────────────────────────────────────
@@ -129,13 +130,16 @@ def train(env_raw) -> PPO:
               f"  total_steps_so_far={model.num_timesteps}")
 
         stats_cb = _StatsCallback()
-        model.learn(
-            total_timesteps     = STEPS_PER_EPOCH,
-            reset_num_timesteps = False,       # accumulate global step counter
-            callback            = stats_cb,
-            tb_log_name         = f"ppo_{robot_name}",
-            progress_bar        = True,
-        )
+        try:
+            model.learn(
+                total_timesteps     = STEPS_PER_EPOCH,
+                reset_num_timesteps = False,       # accumulate global step counter
+                callback            = stats_cb,
+                tb_log_name         = f"ppo_{robot_name}",
+                progress_bar        = True,
+            )
+        finally:
+            vec_env.save(os.path.join(_CKPT_DIR, f"epoch_{epoch:02d}_{robot_name}_vecnorm.pkl"))
 
         ckpt_stem = os.path.join(_CKPT_DIR, f"epoch_{epoch:02d}_{robot_name}")
         model.save(ckpt_stem)

@@ -68,7 +68,7 @@ import sys
 from collections import deque
 
 
-#print("Python executable:", sys.executable)
+print("Python executable:", sys.executable)
 #print("Python version:", sys.version)
 
 import numpy as np
@@ -333,7 +333,7 @@ class SoccerEnv(Supervisor, gym.Env):
         truncated  = self._step_count >= self._max_steps
 
         # ── Reward (uses OLD _prev_* values) ──────────────────────────────
-        reward = self._compute_reward(
+        reward = self._compute_reward_2(
             dist_ball, ball_pos, robot_pos, events
         )
 
