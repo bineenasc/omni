@@ -27,17 +27,21 @@ import matplotlib.pyplot as plt
 import sys
 
 from pathlib import Path
+
 from stable_baselines3 import PPO
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from soccer_supervisor import SoccerEnv
 from shared_configs import FIELD
+
 
 #  Allow running as both a Webots controller and a plain Python script 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, ".."))   # for shared_configs
  
-
-MODEL_PATH = os.path.join(_HERE, "models", "best_model", "best_model.zip")
+_CKPT_DIR = os.path.join(_HERE, "checkpoints")
+MODEL_PATH = os.path.join(_CKPT_DIR, "final_model.zip")
 N_EPISODES = 10
 DETERMINISTIC = True # False = stochastic actions (more variety in eval)
 
@@ -46,6 +50,15 @@ DETERMINISTIC = True # False = stochastic actions (more variety in eval)
 # --------- #
 # FUNCTIONS #
 # --------- #
+
+def _find_vecnorm(model_path: str) -> str | None:
+    """
+    Given  .../checkpoints/epoch_05_viper.zip
+    return .../checkpoints/epoch_05_viper_vecnorm.pkl  if it exists.
+    """
+    stem = os.path.splitext(model_path)[0]
+    pkl  = stem + "_vecnorm.pkl"
+    return pkl if os.path.isfile(pkl) else None
 
 
 # --- EVAL --- #
@@ -66,32 +79,53 @@ def model_evaluate(
     print(f"Episodes: {n_episodes}  |  Deterministic: {deterministic}")
     print(f"{'─'*51}\n")
  
-    env = SoccerEnv()
     #model = PPO.load(model_path, env=env)    # still deciding wher to load model
 
+    env_raw  = SoccerEnv()
+    env_mon  = Monitor(env_raw)
+    vec_env  = DummyVecEnv([lambda: env_mon])
+
+    vecnorm_path = _find_vecnorm(model_path)
+    if vecnorm_path:
+        print(f" VecNorm: {vecnorm_path}")
+        vec_env = VecNormalize.load(vecnorm_path, vec_env)
+        vec_env.training = False   # freeze running stats during eval
+        vec_env.norm_reward = False   # return raw rewards for reporting
+    else:
+        print(" VecNorm: not found — rewards will be raw (unnormalised)")
+        vec_env = VecNormalize(
+            vec_env,
+            norm_obs = False,
+            norm_reward = False,
+            gamma = 0.99,
+        )
+
+    model = PPO.load(model_path, env=vec_env)
     # ----------§---------- #
 
     results = []
 
     for ep in range(n_episodes):
-        model = PPO.load(model_path, env=env) # load model inside loop to reset any VecNormalize stats if used during training
+        #model = PPO.load(model_path, env=vec_env) # load model inside loop to reset any VecNormalize stats if used during training
 
-        obs, _  = env.reset()
+        obs, _  = vec_env.reset() # if model load inside, comment this line
         ep_reward = 0.0
         ep_steps = 0
-        terminated = False
-        truncated = False
+        done = False
+        last_info = {}
 
         # run sim and get in episode metrics
-        while not (terminated or truncated):
+        while not done:
             action, _ = model.predict(obs, deterministic=deterministic)
-            obs, reward, terminated, truncated, info = env.step(action)
-            ep_reward += reward
+            obs, reward, dones, infos = vec_env.step(action)
+            ep_reward += float(reward[0])
             ep_steps += 1
+            last_info = infos[0]
+            done = bool(dones[0])
 
 
         # final ball dist to goal (read directly from the Webots node)
-        ball_p = env._ball_node.getPosition()
+        ball_p = env_raw._ball_node.getPosition()
         ball_x = ball_p[0]
         ball_z = ball_p[2]
         dist_to_goal= math.hypot(ball_x, ball_z - GOAL_Z)
@@ -103,9 +137,9 @@ def model_evaluate(
                 ep = ep + 1,
                 reward = ep_reward,
                 steps = ep_steps,
-                goal_scored = info.get("goal_scored", False),
-                own_goal = info.get("own_goal", False),
-                ball_out = info.get("ball_out", False),
+                goal_scored = last_info.get("goal_scored", False),
+                own_goal = last_info.get("own_goal", False),
+                ball_out = last_info.get("ball_out", False),
                 dist_to_goal = dist_to_goal,
                 ball_x = ball_x,
                 ball_z = ball_z,
@@ -119,7 +153,7 @@ def model_evaluate(
             f"{'─'*51}\n"
         )
 
-    env.close()
+    vec_env.close()
 
 
     # ------------------------------ #
