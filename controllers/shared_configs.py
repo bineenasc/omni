@@ -22,7 +22,7 @@ ROBOT_CONFIGS = {
         "wheel_distance": 0.138,       # m  — centre-of-robot to wheel anchor
         "max_velocity":   15.0,        # rad/s — safe clamp for RL actions
         "body_radius":    0.120,       # m  — used for collision / display
-        "lidar_rays":     360,
+        "lidar_rays":     1440,
         "lidar_min_range": 0.02,       # m
         "lidar_max_range": 3.50,       # m
     },
@@ -34,7 +34,7 @@ ROBOT_CONFIGS = {
         "wheel_distance": 0.170,       # m  — wider stance (larger body)
         "max_velocity":   9.0,         # rad/s — ~0.315 m/s top speed (vs ~0.45 m/s Viper)
         "body_radius":    0.165,       # m
-        "lidar_rays":     360,
+        "lidar_rays":     1440,
         "lidar_min_range": 0.02,
         "lidar_max_range": 3.50,
     },
@@ -63,7 +63,7 @@ BALL = {
 SIM = {
     "basic_time_step": 8,       # ms — must match WorldInfo.basicTimeStep in soccer.wbt
     "steps_per_action": 5,      # physics steps executed per RL action (= 40 ms / action)
-    "max_episode_steps": 1000,  # episode timeout (1000 × 40 ms = 40 s)
+    "max_episode_steps": 1500,  # episode timeout (1500 × 40 ms = 60 s)
     # ↑ Reduced from 2000: at MAX_LINEAR=0.5 m/s the robot can cross the full
     # 10.4 m field in ≈520 steps.  1000 steps gives a generous margin while
     # doubling the number of resets per epoch (≥30 episodes vs ≤15).
@@ -72,7 +72,7 @@ SIM = {
 
 # ── IPC protocol (Emitter/Receiver between robot and supervisor) ──────────────
 # Channel 0: supervisor → robot   (action packet: [vx, vz, omega])
-# Channel 1: robot → supervisor   (sensor packet: [robot_id, lidar × 360])
+# Channel 1: robot → supervisor   (sensor packet: [robot_id, lidar × 1440])
 #
 # Both sides must use the same format strings.  Defined once here to prevent
 # desync bugs between robot_controller.py and soccer_supervisor.py.
@@ -83,10 +83,10 @@ IPC = {
     "action_channel":  0,
     "sensor_channel":  1,
     "action_fmt":      "3f",
-    "action_bytes":    _struct.calcsize("3f"),       # 12 bytes
-    "n_lidar":         360,
-    "sensor_fmt":      f"i{360}f",
-    "sensor_bytes":    _struct.calcsize(f"i{360}f"), # 1444 bytes
+    "action_bytes":    _struct.calcsize("3f"),         # 12 bytes
+    "n_lidar":         1440,
+    "sensor_fmt":      f"i{1440}f",
+    "sensor_bytes":    _struct.calcsize(f"i{1440}f"), # 5764 bytes
 }
 
 

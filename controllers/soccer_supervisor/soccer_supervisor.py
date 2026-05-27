@@ -17,15 +17,28 @@ positions directly via the Webots node API (no IPC needed for that).
 Only lidar data travels over the wire because the Supervisor cannot
 read sensor values that belong to another controller process.
 
-Observation space (gymnasium.spaces.Dict)
-──────────────────────────────────────────
-  "vector"  Box(7,)   [type_id, dist_ball_n, dir_bx, dir_bz,
-                        dist_goal_n, dir_gx, dir_gz]
-  "lidar"   Box(360,) normalised range image [0, 1]
+Observation space (gymnasium.spaces.Box)
+────────────────────────────────────────
+  Box(19,)  [type_id,
+              dist_ball_n, dir_bx, dir_bz,     ← LOCAL frame
+              dist_goal_n, dir_gx, dir_gz,     ← LOCAL frame
+              dist_ar_n, dir_ar_x, dir_ar_z,   ← attack right post  (LOCAL)
+              dist_al_n, dir_al_x, dir_al_z,   ← attack left post   (LOCAL)
+              dist_or_n, dir_or_x, dir_or_z,   ← own right post     (LOCAL)
+              dist_ol_n, dir_ol_x, dir_ol_z]   ← own left post      (LOCAL)
+
+  Todas as direções são rotacionadas para o frame LOCAL do robô antes de
+  entrar no obs. Assim dir_bz > 0 significa "bola à frente" e a rede
+  mapeia diretamente observação → ação sem aprender rotação implícita.
+  (LiDAR é transmitido por IPC mas não entra na política.)
+
+  (LiDAR is bumped to 1440 rays and still transmitted over IPC so the
+   robot controller can detect obstacles, but goal-post detection is done
+   analytically from GPS in the supervisor instead of through CNN.)
 
 Action space
 ────────────
-  Box(3,) in [-1, 1]   →   scaled to [vx, vz, omega]
+  Box(3,)  in [-1, 1]  →   scaled to [vx, vz, omega]
 
 Reward (dense)
 ──────────────
@@ -52,6 +65,7 @@ import math
 import os
 import struct
 import sys
+from collections import deque
 
 import numpy as np
 
@@ -128,21 +142,28 @@ class SoccerEnv(Supervisor, gym.Env):
         self._receiver.enable(self._timestep)
 
         # ── Gymnasium spaces ───────────────────────────────────────────────
-        # "vector" bounds are per-component:
-        #   index 0 : type_id             ∈ {0, 1}    → [0, 1]
-        #   index 1 : dist_ball_norm      ∈ [0, 1]    → [0, 1]
-        #   index 2 : dir_ball_x          ∈ [-1, 1]
-        #   index 3 : dir_ball_z          ∈ [-1, 1]
-        #   index 4 : dist_goal_norm      ∈ [0, 1]    → [0, 1]
-        #   index 5 : dir_goal_x          ∈ [-1, 1]
-        #   index 6 : dir_goal_z          ∈ [-1, 1]
-        _vec_low  = np.array([0., 0., -1., -1., 0., -1., -1.], dtype=np.float32)
-        _vec_high = np.array([1., 1.,  1.,  1., 1.,  1.,  1.], dtype=np.float32)
-        self.observation_space = spaces.Dict({
-            "vector": spaces.Box(low=_vec_low, high=_vec_high, dtype=np.float32),
-            "lidar":  spaces.Box(low=0.0, high=1.0,
-                                 shape=(_N_LIDAR,), dtype=np.float32),
-        })
+        # "vector" bounds are per-component (19 dimensions, LOCAL frame):
+        #   [0]       type_id             ∈ {0, 1}    → [0, 1]
+        #   [1]       dist_ball_norm      ∈ [0, 1]
+        #   [2–3]     dir_ball (local)    ∈ [-1, 1] each
+        #   [4]       dist_goal_norm      ∈ [0, 1]
+        #   [5–6]     dir_goal (local)    ∈ [-1, 1] each
+        #   [7–9]     attack-right post   dist_norm, dir_x, dir_z  (local)
+        #   [10–12]   attack-left  post   dist_norm, dir_x, dir_z  (local)
+        #   [13–15]   own-right    post   dist_norm, dir_x, dir_z  (local)
+        #   [16–18]   own-left     post   dist_norm, dir_x, dir_z  (local)
+        # Pattern per post: [0,1], [-1,1], [-1,1]
+        _post_low  = [0., -1., -1.] * 4   # 12 values for 4 posts
+        _post_high = [1.,  1.,  1.] * 4
+        _obs_low  = np.array(
+            [0., 0., -1., -1., 0., -1., -1.] + _post_low,  dtype=np.float32
+        )
+        _obs_high = np.array(
+            [1., 1.,  1.,  1., 1.,  1.,  1.] + _post_high, dtype=np.float32
+        )
+        self.observation_space = spaces.Box(
+            low=_obs_low, high=_obs_high, dtype=np.float32
+        )
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(3,), dtype=np.float32
         )
@@ -155,7 +176,27 @@ class SoccerEnv(Supervisor, gym.Env):
         self._prev_dist_ball      : float = FIELD_DIAG
         self._prev_dist_ball_goal : float = FIELD_DIAG
         self._prev_robot_pos      : tuple = (0.0, 0.0)
+        self._prev_ball_z         : float = 0.0   # z da bola no passo anterior
         self._rng                         = np.random.default_rng()
+
+        # ── Curriculum de posições ─────────────────────────────────────────
+        # Contador global de passos — incrementado em step(), nunca resetado.
+        # Fase 1 (0–100k)  : bola perto do gol, robô atrás da bola
+        # Fase 2 (100k–300k): bola no campo de ataque, robô aleatório
+        # Fase 3 (300k+)   : completamente aleatório
+        self._curriculum_step : int = 0
+
+        # ── Bônus de meio campo (uma vez por episódio) ─────────────────────
+        # Dado quando a bola cruza de z<0 para z>0 (campo de ataque)
+        self._midfield_bonus_given : bool = False
+
+        # ── Histórico de posições para penalidade de 10 segundos ──────────
+        # 10 s ÷ 40 ms/step = 250 steps
+        _WINDOW = 250
+        self._pos_history : deque = deque(maxlen=_WINDOW)
+        self._NO_PROGRESS_WINDOW  = _WINDOW          # passos na janela
+        self._NO_PROGRESS_THRESH  = 0.30             # metros de deslocamento líquido mínimo
+        self._NO_PROGRESS_PENALTY = -0.02            # reward por passo sem progresso
 
     # ══════════════════════════════════════════════════════════════════════════
     # Gymnasium core
@@ -170,18 +211,58 @@ class SoccerEnv(Supervisor, gym.Env):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
 
-        self._step_count  = 0
-        self._still_steps = 0
+        self._step_count          = 0
+        self._still_steps         = 0
+        self._midfield_bonus_given = False
+        self._pos_history.clear()
 
-        # ── Randomise ball (centre region of the field) ────────────────────
-        bx = self._rng.uniform(
-            -FIELD["half_width"]  * 0.60,
-             FIELD["half_width"]  * 0.60,
-        )
-        bz = self._rng.uniform(
-            -FIELD["half_length"] * 0.40,
-             FIELD["half_length"] * 0.40,
-        )
+        # ── Curriculum de posições ─────────────────────────────────────────
+        # Fase 1a (0–30k)   : bola a 5–20 cm do gol, dentro das traves → gol quase garantido
+        # Fase 1b (30k–100k): bola a 0.5–1.5 m do gol, robô logo atrás
+        # Fase 2 (100k–300k): bola no campo de ataque (z>0), robô aleatório
+        # Fase 3 (300k+)    : completamente aleatório
+        cs = self._curriculum_step
+        _gz  = FIELD["goal_z_attack"]    # 4.55
+        _ghw = FIELD["goal_half_width"]  # 0.75
+
+        if cs < 30_000:
+            # Fase 1a — trivial: bola quase dentro do gol.
+            # Qualquer toque no +Z marca gol → PPO descobre o +50 rapidamente.
+            bz = self._rng.uniform(_gz - 0.20, _gz - 0.05)   # 4.35 → 4.50
+            bx = self._rng.uniform(-_ghw * 0.70, _ghw * 0.70) # dentro das traves
+            # Robô alinhado com a bola, 15–40 cm atrás
+            rz = float(bz) - self._rng.uniform(0.15, 0.40)
+            rx = float(bx) + self._rng.uniform(-0.15, 0.15)
+
+        elif cs < 100_000:
+            # Fase 1b — fácil: bola de 0.5 a 1.5 m do gol, robô atrás
+            bz = self._rng.uniform(_gz - 1.50, _gz - 0.50)   # 3.05 → 4.05
+            bx = self._rng.uniform(-_ghw, _ghw)               # dentro das traves
+            rz_max = float(bz) - 0.20
+            rz_min = max(float(bz) - 1.20, 0.0)
+            rz = self._rng.uniform(rz_min, rz_max)
+            rx = float(bx) + self._rng.uniform(-0.30, 0.30)
+
+        elif cs < 300_000:
+            # Fase 2 — médio: bola no campo de ataque (z>0)
+            bz = self._rng.uniform(0.0, FIELD["half_length"] * 0.80)
+            bx = self._rng.uniform(-FIELD["half_width"] * 0.60,
+                                    FIELD["half_width"] * 0.60)
+            rz_max = max(float(bz) - 0.20, -0.20)
+            rz = self._rng.uniform(-FIELD["half_length"] * 0.85, rz_max)
+            rx = self._rng.uniform(-FIELD["half_width"] * 0.70,
+                                    FIELD["half_width"] * 0.70)
+
+        else:
+            # Fase 3 — aleatório completo
+            bx = self._rng.uniform(-FIELD["half_width"]  * 0.60,
+                                    FIELD["half_width"]  * 0.60)
+            bz = self._rng.uniform(-FIELD["half_length"] * 0.40,
+                                    FIELD["half_length"] * 0.40)
+            rx = self._rng.uniform(-FIELD["half_width"]  * 0.70,
+                                    FIELD["half_width"]  * 0.70)
+            rz = self._rng.uniform(-FIELD["half_length"] * 0.85, -0.5)
+
         self._ball_node.getField("translation").setSFVec3f(
             [float(bx), BALL["radius"], float(bz)]
         )
@@ -189,14 +270,6 @@ class SoccerEnv(Supervisor, gym.Env):
         self._ball_node.resetPhysics()
 
         # ── Randomise robot (own half: z < 0) ─────────────────────────────
-        rx = self._rng.uniform(
-            -FIELD["half_width"]  * 0.70,
-             FIELD["half_width"]  * 0.70,
-        )
-        rz = self._rng.uniform(
-            -FIELD["half_length"] * 0.85,
-            -0.5,
-        )
         self._robot_node.getField("translation").setSFVec3f(
             [float(rx), 0.0, float(rz)]
         )
@@ -218,11 +291,12 @@ class SoccerEnv(Supervisor, gym.Env):
         ball_pos = _flat(self._ball_node)
         obs      = self._get_obs()
 
-        self._prev_dist_ball      = float(obs["vector"][1]) * FIELD_DIAG
+        self._prev_dist_ball      = float(obs[1]) * FIELD_DIAG
         self._prev_dist_ball_goal = math.hypot(
             ball_pos[0], ball_pos[1] - FIELD["goal_z_attack"]
         )
         self._prev_robot_pos = _flat(self._robot_node)
+        self._prev_ball_z    = ball_pos[1]
 
         return obs, {}
 
@@ -247,7 +321,7 @@ class SoccerEnv(Supervisor, gym.Env):
         obs       = self._get_obs()
         ball_pos  = _flat(self._ball_node)
         robot_pos = _flat(self._robot_node)
-        dist_ball = float(obs["vector"][1]) * FIELD_DIAG
+        dist_ball = float(obs[1]) * FIELD_DIAG
 
         # ── Events & terminal flags ────────────────────────────────────────
         events     = self._check_events(ball_pos)
@@ -264,7 +338,9 @@ class SoccerEnv(Supervisor, gym.Env):
         self._prev_dist_ball_goal = math.hypot(
             ball_pos[0], ball_pos[1] - FIELD["goal_z_attack"]
         )
-        self._prev_robot_pos = robot_pos
+        self._prev_robot_pos  = robot_pos
+        self._prev_ball_z     = ball_pos[1]
+        self._curriculum_step += 1
 
         info = {**events, "step": self._step_count}
         return obs, float(reward), terminated, truncated, info
@@ -273,28 +349,78 @@ class SoccerEnv(Supervisor, gym.Env):
     # Observation
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _get_obs(self) -> dict:
+    def _get_obs(self) -> np.ndarray:
         cfg       = get_robot_config(self._active_robot)
         robot_pos = _flat(self._robot_node)
         ball_pos  = _flat(self._ball_node)
         goal_pos  = (0.0, float(FIELD["goal_z_attack"]))
 
-        dist_ball, dir_ball = _vec2d(robot_pos, ball_pos)
-        dist_goal, dir_goal = _vec2d(robot_pos, goal_pos)
+        # ── Heading do robô para rotacionar para frame local ───────────────
+        heading    = self._get_heading()
+        cos_h      = math.cos(heading)
+        sin_h      = math.sin(heading)
 
-        vector = np.array(
+        dist_ball, dir_ball_w = _vec2d(robot_pos, ball_pos)
+        dist_goal, dir_goal_w = _vec2d(robot_pos, goal_pos)
+
+        # Rotaciona direção do frame mundo → frame local do robô.
+        # Ry(-θ): local_x =  cos θ·dx + sin θ·dz
+        #         local_z = -sin θ·dx + cos θ·dz
+        # Com isso: se a bola está à frente, dir_bz > 0 → vz > 0 (direto).
+        def to_local(dx: float, dz: float) -> tuple[float, float]:
+            return ( cos_h * dx + sin_h * dz,
+                    -sin_h * dx + cos_h * dz)
+
+        dir_ball = to_local(dir_ball_w[0], dir_ball_w[1])
+        dir_goal = to_local(dir_goal_w[0], dir_goal_w[1])
+
+        # ── 4 postes do gol em frame local ────────────────────────────────
+        hw = FIELD["goal_half_width"]
+        _posts = [
+            ( hw, FIELD["goal_z_attack"]),   # attack right
+            (-hw, FIELD["goal_z_attack"]),   # attack left
+            ( hw, FIELD["goal_z_own"]),      # own right
+            (-hw, FIELD["goal_z_own"]),      # own left
+        ]
+        post_feats: list[float] = []
+        for px, pz in _posts:
+            d, uv_w = _vec2d(robot_pos, (px, pz))
+            uv_l = to_local(uv_w[0], uv_w[1])
+            post_feats += [d / FIELD_DIAG, uv_l[0], uv_l[1]]
+
+        obs = np.array(
             [
-                float(cfg["type_id"]),       # 0 (viper) or 1 (titan)
-                dist_ball / FIELD_DIAG,      # normalised robot→ball distance
-                dir_ball[0],                 # unit-vector X component
-                dir_ball[1],                 # unit-vector Z component
-                dist_goal / FIELD_DIAG,      # normalised robot→goal distance
-                dir_goal[0],
-                dir_goal[1],
-            ],
+                float(cfg["type_id"]),       # [0]  0=viper / 1=titan
+                dist_ball / FIELD_DIAG,      # [1]  dist normalizada robô→bola
+                dir_ball[0],                 # [2]  dir_x LOCAL
+                dir_ball[1],                 # [3]  dir_z LOCAL  (>0 = bola à frente)
+                dist_goal / FIELD_DIAG,      # [4]  dist normalizada robô→gol
+                dir_goal[0],                 # [5]  dir_x LOCAL
+                dir_goal[1],                 # [6]  dir_z LOCAL  (>0 = gol à frente)
+            ] + post_feats,                  # [7-18] 4 postes × (dist, dir_x, dir_z) LOCAL
             dtype=np.float32,
         )
-        return {"vector": vector, "lidar": self._last_lidar.copy()}
+        return obs
+
+    def _get_heading(self) -> float:
+        """Extrai o yaw (rotação em torno do eixo Y global) do robô.
+
+        Webots usa NUE: X=leste, Y=cima, Z=sul.
+        getOrientation() retorna uma matriz de rotação 3×3 em row-major:
+            [m0 m1 m2]
+            [m3 m4 m5]
+            [m6 m7 m8]
+
+        O proto do robô tem rotação base de -90° em X (para ficar em pé no
+        plano XZ). A orientação efectiva no plano horizontal é uma rotação
+        Ry(θ) composta com Rx(-90°). Após a álgebra, o yaw θ no plano XZ é:
+            yaw = atan2(-m[1], m[0])
+        onde m[0] = cos θ  e  m[1] = -sin θ  (colunas da linha 0 de Ry(θ)·Rx(-90°)).
+
+        Retorna yaw em radianos ∈ (-π, π].
+        """
+        m = self._robot_node.getOrientation()   # lista de 9 floats, row-major
+        return math.atan2(-m[1], m[0])
 
     # ══════════════════════════════════════════════════════════════════════════
     # Reward
@@ -310,32 +436,55 @@ class SoccerEnv(Supervisor, gym.Env):
 
         # 1. Terminal events — dominant signal, early return
         if events["goal_scored"]:
-            return 10.0
+            return 50.0     # aumentado de 10 para 50 — gol deve dominar o sinal
         if events["own_goal"]:
-            return -8.0
+            return -30.0    # aumentado de -8 para -30
         if events["ball_out"]:
             return -2.0     # ball left the field without scoring
 
         reward = 0.0
 
         # 2. Progress of robot toward ball
-        reward += (self._prev_dist_ball - dist_ball) * 3.0
+        reward += (self._prev_dist_ball - dist_ball) * 2.0
 
-        # 3. Progress of ball toward attack goal
+        # 3. Proximidade contínua à bola — sinal denso para a rede de valor aprender.
+        # Decai linearmente: +0.03 quando tocando a bola, → 0 na outra ponta do campo.
+        # Máximo acumulado: 1500 × 0.03 = +45/episódio < gol (+50) → hierarquia correta.
+        # Substitui o bônus de contato binário (+0.3 fixo) que causava hover.
+        reward += 0.03 * (1.0 - min(dist_ball, FIELD_DIAG) / FIELD_DIAG)
+
+        # 4. Progress of ball toward attack goal — escalado pela proximidade do robô.
+        # O fator de proximidade força a sequência: ir até a bola → empurrar pro gol.
+        # Sem essa escala, o robô pode ganhar reward de "bola avançando" sem estar perto,
+        # e aprende a ficar parado esperando a bola rolar sozinha.
+        #
+        # fator = 1.0 quando tocando a bola, 0.0 quando dist ≥ _GOAL_PROX_SCALE.
+        _GOAL_PROX_SCALE = 2.0   # metros — raio de influência do robô sobre a bola
+        prox_factor = max(0.0, 1.0 - dist_ball / _GOAL_PROX_SCALE)
         dist_ball_to_goal = math.hypot(
             ball_pos[0], ball_pos[1] - FIELD["goal_z_attack"]
         )
-        reward += (self._prev_dist_ball_goal - dist_ball_to_goal) * 5.0
+        # Clipa para nunca ser negativo: empurrar a bola para o lado é neutro (0),
+        # empurrar para o gol é bom (+). Sem o clip, empurrar na direção errada
+        # dava reward negativo, e o robô aprendia a NÃO tocar na bola.
+        goal_progress = self._prev_dist_ball_goal - dist_ball_to_goal
+        reward += max(0.0, goal_progress) * 10.0 * prox_factor
 
-        # 4. Ball aligned on the robot→goal line (+0.05 bonus)
-        reward += _alignment_bonus(
-            ball_pos, robot_pos, FIELD["goal_z_attack"]
-        )
+        # 4. Bônus de meio campo — +0.5 uma vez por episódio quando a bola
+        # cruza de z<0 (campo defensivo) para z>0 (campo de ataque).
+        # Cria um degrau intermediário: aproximar → cruzar → marcar.
+        if (not self._midfield_bonus_given
+                and self._prev_ball_z < 0.0
+                and ball_pos[1] >= 0.0):
+            self._midfield_bonus_given = True
+            reward += 0.5
 
         # 5. Ball velocity component directed toward goal
         reward += _ball_toward_goal_bonus(
             self._ball_node, ball_pos, FIELD["goal_z_attack"]
         )
+
+        # (bônus de alinhamento removido — sinal muito fraco, só adicionava ruído)
 
         # 6. Stillness penalty — encourages the robot to keep moving
         moved = math.hypot(
@@ -349,7 +498,20 @@ class SoccerEnv(Supervisor, gym.Env):
         else:
             self._still_steps = 0
 
-        # 7. Per-step time penalty
+        # 7. Penalidade por falta de progresso em 10 segundos
+        # Guarda posição atual no histórico e compara com a posição de 250 passos atrás.
+        # Se o deslocamento líquido for menor que 30cm, o robô está preso/oscilando.
+        self._pos_history.append(robot_pos)
+        if len(self._pos_history) == self._NO_PROGRESS_WINDOW:
+            old_pos = self._pos_history[0]
+            net_displacement = math.hypot(
+                robot_pos[0] - old_pos[0],
+                robot_pos[1] - old_pos[1],
+            )
+            if net_displacement < self._NO_PROGRESS_THRESH:
+                reward += self._NO_PROGRESS_PENALTY
+
+        # 8. Per-step time penalty
         reward -= 0.001
 
         return float(reward)

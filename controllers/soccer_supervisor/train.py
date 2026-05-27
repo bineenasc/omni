@@ -12,8 +12,8 @@ Epoch loop
   Epoch 2  →  Viper
   …
 
-The same PPO model (and CNN weights) is used throughout.  The robot type_id
-in the observation vector lets the network distinguish the two robots.
+The same PPO model is used throughout.  The robot type_id in the
+observation vector lets the network distinguish the two robots.
 Each epoch the physical robot node is hot-swapped via env.swap_robot().
 
 Outputs (relative to this file's directory)
@@ -27,7 +27,6 @@ Outputs (relative to this file's directory)
 from __future__ import annotations
 
 import os
-import sys
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -37,24 +36,20 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-# lidar_cnn.py lives alongside this file
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lidar_cnn import LidarCNNExtractor
-
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
 N_EPOCHS        = 20
 STEPS_PER_EPOCH = 30_000          # Webots env steps (not Webots basic timesteps)
 ROBOT_SEQUENCE  = ["viper", "titan"]
 
+# No CNN extractor — observation is now a flat 19-dim vector (MlpPolicy handles it).
+# Larger layers than before because the network sees goal-post geometry directly.
 POLICY_KWARGS: dict = dict(
-    features_extractor_class  = LidarCNNExtractor,
-    features_extractor_kwargs = dict(lidar_features=32, vector_features=32),
-    net_arch = [64, 64],          # policy + value MLP layers after the extractor
+    net_arch = [256, 128],        # policy + value MLP
 )
 
 PPO_KWARGS: dict = dict(
-    policy        = "MultiInputPolicy",
+    policy        = "MlpPolicy",
     n_steps       = 1024,
     batch_size    = 64,
     n_epochs      = 10,

@@ -145,7 +145,7 @@ PROTO Viper [
         translation 0 0 0.100
         rotation 0 0 1 0
         name "lidar"
-        horizontalResolution 360
+        horizontalResolution 1440
         fieldOfView 6.28318
         numberOfLayers 1
         near 0.02
