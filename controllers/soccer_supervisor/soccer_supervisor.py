@@ -67,6 +67,10 @@ import struct
 import sys
 from collections import deque
 
+
+#print("Python executable:", sys.executable)
+#print("Python version:", sys.version)
+
 import numpy as np
 
 # ── Bootstrap shared_configs (controllers/ is one level up) ──────────────────
@@ -130,7 +134,7 @@ class SoccerEnv(Supervisor, gym.Env):
 
         self._timestep      = int(self.getBasicTimeStep())   # 8 ms
         self._steps_per_act = SIM["steps_per_action"]        # 5  → 40 ms/step
-        self._max_steps     = SIM["max_episode_steps"]       # 2000
+        self._max_steps     = 375 #15 seconds/0.04   //#SIM["max_episode_steps"]       # 2000
 
         # ── Webots node handles ────────────────────────────────────────────
         self._ball_node  = self.getFromDef("BOLA")
@@ -403,7 +407,8 @@ class SoccerEnv(Supervisor, gym.Env):
         return obs
 
     def _get_heading(self) -> float:
-        """Extrai o yaw (rotação em torno do eixo Y global) do robô.
+        """
+        Extrai o yaw (rotação em torno do eixo Y global) do robô.
 
         Webots usa NUE: X=leste, Y=cima, Z=sul.
         getOrientation() retorna uma matriz de rotação 3×3 em row-major:
@@ -425,6 +430,190 @@ class SoccerEnv(Supervisor, gym.Env):
     # ══════════════════════════════════════════════════════════════════════════
     # Reward
     # ══════════════════════════════════════════════════════════════════════════
+
+    def _compute_reward_2(
+        self,
+        dist_ball: float,
+        ball_pos: tuple,
+        robot_pos: tuple,
+        events: dict,
+    ) -> float:
+        """ 
+        1. SCORE GOAL                       | (dominant objective)
+        2. MOVE BALL TOWARD GOAL            | (main shaping)
+        3. GET INTO GOOD STRIKING POSITION  |
+        4. REACH BALL                       |
+        5. AVOID USELESS / STALLED MOTION   |
+        """
+        
+        # --------------- #
+        # TERMINAL EVENTS #
+        # --------------- #
+
+        if events["goal_scored"]:
+            return +300.0
+        if events["own_goal"]:
+            return -201.0
+        if events["ball_out"]:
+            return -117.0
+
+        # --------- #
+        # Over Time #
+        # --------- #
+        
+        # --- calcs --- #
+        TOUCH_THRESHOLD = 0.16
+        GOAL_Z = FIELD["goal_z_attack"]
+        bx, bz = ball_pos
+        rx, rz = robot_pos
+        reward = 0.0
+
+
+
+        # --- time penalty --- #
+        reward -= 0.002
+        # --- position penalties/rewards --- #
+        if (
+            not self._midfield_bonus_given
+            and self._prev_ball_z < 0.0
+            and bz >= 0.0
+        ):
+
+            self._midfield_bonus_given = True
+            reward += 1.0
+
+
+
+        # --- ball progress toward robot --- #
+        ball_progress = self._prev_dist_ball - dist_ball
+        reward += ball_progress * 2.0
+
+
+
+        # --- ball progress toward goal --- #
+        dist_ball_goal = math.hypot(
+            bx,
+            bz - GOAL_Z
+        )
+        goal_progress = (
+            self._prev_dist_ball_goal
+            - dist_ball_goal
+        )
+        reward += goal_progress * 12.0
+
+
+        # --- ball velocity towords goal [-, +]based direction --- #
+        try:
+            vel = self._ball_node.getVelocity()
+
+            ball_vx = vel[0]
+            ball_vz = vel[2]
+
+            to_goal_x = -bx
+            to_goal_z = GOAL_Z - bz
+
+            norm = math.hypot(to_goal_x, to_goal_z)
+
+            if norm > 1e-6:
+                to_goal_x /= norm
+                to_goal_z /= norm
+                # Dot product
+                toward_goal_speed = (
+                    ball_vx * to_goal_x
+                    + ball_vz * to_goal_z
+                )
+                # Positive if ball moving toward goal
+                reward += np.clip(
+                    toward_goal_speed * 0.8,
+                    -1.0,
+                    1.0,
+                )
+        except Exception:
+            pass
+
+        # --- ball between robot and goal --- #
+        robot_behind_ball = rz < bz
+        if robot_behind_ball:
+            reward += 0.05
+        else:
+            reward -= 0.05
+
+        # --- if alighned with ball and goal --- #
+        rb_x = bx - rx
+        rb_z = bz - rz
+
+        rb_norm = math.hypot(rb_x, rb_z)
+
+        if rb_norm > 1e-6:
+
+            rb_x /= rb_norm
+            rb_z /= rb_norm
+
+            bg_x = -bx
+            bg_z = GOAL_Z - bz
+
+            bg_norm = math.hypot(bg_x, bg_z)
+
+            if bg_norm > 1e-6:
+
+                bg_x /= bg_norm
+                bg_z /= bg_norm
+
+                alignment = (
+                    rb_x * bg_x
+                    + rb_z * bg_z
+                )
+                # [-1, 1]
+                reward += alignment * 0.3
+
+
+        # --- contact bonus & cooldown --- #
+        if dist_ball < TOUCH_THRESHOLD:
+            if (
+                self._step_count
+                - getattr(self, "_last_touch_step", -999)
+            ) > 8:
+
+                reward += 0.25
+                self._last_touch_step = self._step_count
+
+
+        # --- stillness penalty - ball reached so nothing else to do - --- #
+        try:
+            vel = self._ball_node.getVelocity()
+            ball_speed = math.hypot(
+                vel[0],
+                vel[2]
+            )
+            if (
+                dist_ball < 0.25
+                and ball_speed < 0.03
+            ):
+                reward -= 0.05
+        except Exception:
+            pass
+
+
+        # --- stillness penalty - robot stuck --- #
+        try:
+            vel = self._ball_node.getVelocity()
+
+            ball_speed = math.hypot(
+                vel[0],
+                vel[2]
+            )
+
+            if (
+                dist_ball < 0.25
+                and ball_speed < 0.03
+            ):
+                reward -= 0.05
+        except Exception:
+            pass
+
+        
+        return reward
+
 
     def _compute_reward(
         self,

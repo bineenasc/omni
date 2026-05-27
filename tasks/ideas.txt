@@ -61,5 +61,69 @@ Policy Network (PPO)
 
 
 
+CL 
+1- score, take ball to goal
+    - if ball is furder away than robot to the goal take points away
+    - giant reward for scoring (absurdly strong like 10001)
+    - deduct points over time 
+    - decuct points if robot or ball fall off the field 
+    - give points based on alighnment of ball matrix speed towords the goal area, if going the oposit way take points alway
+    - give points based on how alinghn the ector/direction of the robot is to the ball
+    - deduct poinst if robot movement is smaller that a certain threshold(make sure the robot issnt just making small movements and doesnt really get stuck in same place of field)
+    - if there is away for the robot to somewhat be aware/predict ball movement based on veocity and angle of impact - similar to how player of the Eight-ball game chose where and how stronly to hit the ball 
+
+2- place ball in diff positions of the field
+    check how well it adapts to having the ball in diferent locations
+
+3- add obstacles
+    goal is to forc it to learn to dodge, dribble with and without ball
+    - deduct points if hits objects (somewhat strong)
 
 
+for now maybe I’ll focus on the first one - train like 3 models, 
+save them and check if any had decent results and if I should change the rewards, 
+I assume that later on I can take that model and apply it to the other scenarios
+
+
+
+# --- fixed rewards --- #
+        # enemies side +0.5 when ball crosses from z<0 to z>0 (defensive to attack field)
+        # deduction of time 
+        # if ball is between robot and goal + if yes - if no
+        
+
+        # --- dynamic rewards --- #
+        # deduction if overall movement is smaller than x per y time steps (stuck penalty)
+        # if ball is between robot and goal + if yes - if no
+        # add points based on direction and velocity of ball (if towords own goal negative reward, if towords enemy goal positive reward)
+
+        # if ball is between robot and goal extra rewarsd:
+            # assume 8-ball game logic of atacking the ball, give points based on how close to goal it is assumed to end up at  
+            # if near ball, if ball vel is smaller that threshold, deduct points 
+
+
+add
+```bash
+project/
+│
+├── controllers/
+│   ├── soccer_supervisor/
+│   │   ├── soccer_env.py
+│   │   ├── train.py
+│   │   ├── evaluate.py
+│   │   ├── callbacks.py
+│   │   └── shared_configs.py
+│
+├── models/
+│   ├── checkpoints/
+│   ├── best_models/
+│   └── final_models/
+│
+├── logs/
+│   ├── tensorboard/
+│   ├── csv/
+│   └── eval/
+│
+└── results/
+    └── leaderboard.csv
+```
