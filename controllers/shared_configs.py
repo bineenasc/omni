@@ -63,7 +63,7 @@ BALL = {
 SIM = {
     "basic_time_step": 8,       # ms — must match WorldInfo.basicTimeStep in soccer.wbt
     "steps_per_action": 5,      # physics steps executed per RL action (= 40 ms / action)
-    "max_episode_steps": 1500,  # episode timeout (1500 × 40 ms = 60 s)
+    "max_episode_steps": 1000,  # episode timeout (1000 × 40 ms = 40 s)
     # ↑ Reduced from 2000: at MAX_LINEAR=0.5 m/s the robot can cross the full
     # 10.4 m field in ≈520 steps.  1000 steps gives a generous margin while
     # doubling the number of resets per epoch (≥30 episodes vs ≤15).

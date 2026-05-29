@@ -38,8 +38,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
-N_EPOCHS        = 20
-STEPS_PER_EPOCH = 30_000          # Webots env steps (not Webots basic timesteps)
+N_EPOCHS        = 26              # even → 13 epochs each for Viper and Titan
+STEPS_PER_EPOCH = 60_000          # Webots env steps (not Webots basic timesteps)
 ROBOT_SEQUENCE  = ["viper", "titan"]
 
 # No CNN extractor — observation is now a flat 19-dim vector (MlpPolicy handles it).
