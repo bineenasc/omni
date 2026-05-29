@@ -85,12 +85,12 @@ O **fator de proximidade** escala o reward de avanço da bola pela distância ro
 
 O treino usa um curriculum progressivo baseado no contador global de passos:
 
-| Fase | Passos      | Spawn da bola                     | Spawn do robô          |
-|------|-------------|-----------------------------------|------------------------|
-| 1a   | 0 – 30k     | 5–20 cm do gol, dentro das traves | 15–40 cm atrás da bola |
-| 1b   | 30k – 100k  | 50 cm – 1.5 m do gol              | Atrás da bola          |
-| 2    | 100k – 300k | Campo de ataque (z > 0)           | Qualquer posição       |
-| 3    | 300k+       | Completamente aleatório           | Completamente aleatório|
+| Fase | Passos        | Epochs (60k/epoch)         | Spawn da bola                     | Spawn do robô          |
+|------|---------------|----------------------------|-----------------------------------|------------------------|
+| 1a   | 0 – 120k      | 0–1 (1× Viper + 1× Titan)  | 5–20 cm do gol, dentro das traves | 15–40 cm atrás da bola |
+| 1b   | 120k – 240k   | 2–3 (1× Viper + 1× Titan)  | 50 cm – 1.5 m do gol              | Atrás da bola          |
+| 2    | 240k – 360k   | 4–5 (1× Viper + 1× Titan)  | Campo de ataque (z > 0)           | Qualquer posição       |
+| 3    | 360k+         | 6–25 (10× Viper + 10× Titan)| Completamente aleatório           | Completamente aleatório|
 
 A fase 1a é crucial: com a bola a poucos centímetros do gol, qualquer toque marca ponto. Isso garante que o PPO veja o sinal de +50 nas primeiras horas de treino e não fique preso em ótimos locais.
 

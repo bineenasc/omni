@@ -197,11 +197,11 @@ class SoccerEnv(Supervisor, gym.Env):
 
         # ── Histórico de posições para penalidade de 10 segundos ──────────
         # 10 s ÷ 40 ms/step = 250 steps
-        _WINDOW = 250
+        _WINDOW = 150   # 150 steps × 40 ms = 6 seconds
         self._pos_history : deque = deque(maxlen=_WINDOW)
         self._NO_PROGRESS_WINDOW  = _WINDOW          # passos na janela
         self._NO_PROGRESS_THRESH  = 0.30             # metros de deslocamento líquido mínimo
-        self._NO_PROGRESS_PENALTY = -0.05            # reward por passo sem progresso
+        self._NO_PROGRESS_PENALTY = -0.08            # reward por passo sem progresso
 
     # ══════════════════════════════════════════════════════════════════════════
     # Gymnasium core
@@ -231,26 +231,31 @@ class SoccerEnv(Supervisor, gym.Env):
         _gz  = FIELD["goal_z_attack"]    # 4.55
         _ghw = FIELD["goal_half_width"]  # 0.75
 
-        if cs < 30_000:
-            # Fase 1a — trivial: bola quase dentro do gol.
-            # Qualquer toque no +Z marca gol → PPO descobre o +50 rapidamente.
-            bz = self._rng.uniform(_gz - 0.20, _gz - 0.05)   # 4.35 → 4.50
-            bx = self._rng.uniform(-_ghw * 0.70, _ghw * 0.70) # dentro das traves
-            # Robô alinhado com a bola, 15–40 cm atrás
+        # Phase boundaries align with the epoch schedule (60k steps/epoch, 26 epochs):
+        #   Phase 1a: epochs 0–1   (1× Viper + 1× Titan)  →   0 – 120k steps
+        #   Phase 1b: epochs 2–3   (1× Viper + 1× Titan)  → 120k – 240k steps
+        #   Phase 2:  epochs 4–5   (1× Viper + 1× Titan)  → 240k – 360k steps
+        #   Phase 3:  epochs 6–25  (10× Viper + 10× Titan) →  360k+ steps
+
+        if cs < 120_000:
+            # Phase 1a — trivial: ball almost inside the goal.
+            # Any touch in +Z scores → PPO finds the +300 signal quickly.
+            bz = self._rng.uniform(_gz - 0.20, _gz - 0.05)    # 4.35 → 4.50
+            bx = self._rng.uniform(-_ghw * 0.70, _ghw * 0.70) # within posts
             rz = float(bz) - self._rng.uniform(0.15, 0.40)
             rx = float(bx) + self._rng.uniform(-0.15, 0.15)
 
-        elif cs < 100_000:
-            # Fase 1b — fácil: bola de 0.5 a 1.5 m do gol, robô atrás
-            bz = self._rng.uniform(_gz - 1.50, _gz - 0.50)   # 3.05 → 4.05
-            bx = self._rng.uniform(-_ghw, _ghw)               # dentro das traves
+        elif cs < 240_000:
+            # Phase 1b — easy: ball 0.5–1.5 m from goal, robot just behind ball
+            bz = self._rng.uniform(_gz - 1.50, _gz - 0.50)    # 3.05 → 4.05
+            bx = self._rng.uniform(-_ghw, _ghw)
             rz_max = float(bz) - 0.20
             rz_min = max(float(bz) - 1.20, 0.0)
             rz = self._rng.uniform(rz_min, rz_max)
             rx = float(bx) + self._rng.uniform(-0.30, 0.30)
 
-        elif cs < 300_000:
-            # Fase 2 — médio: bola no campo de ataque (z>0)
+        elif cs < 360_000:
+            # Phase 2 — medium: ball in the attack half (z > 0), robot anywhere
             bz = self._rng.uniform(0.0, FIELD["half_length"] * 0.80)
             bx = self._rng.uniform(-FIELD["half_width"] * 0.60,
                                     FIELD["half_width"] * 0.60)
@@ -260,7 +265,7 @@ class SoccerEnv(Supervisor, gym.Env):
                                     FIELD["half_width"] * 0.70)
 
         else:
-            # Fase 3 — aleatório completo
+            # Phase 3 — fully random: both robot and ball anywhere on the field
             bx = self._rng.uniform(-FIELD["half_width"]  * 0.60,
                                     FIELD["half_width"]  * 0.60)
             bz = self._rng.uniform(-FIELD["half_length"] * 0.40,
@@ -291,12 +296,21 @@ class SoccerEnv(Supervisor, gym.Env):
             self._send_action(0.0, 0.0, 0.0)
             self._sim_step()
 
-        # Guard against physics glitch where the robot sinks below the ground.
-        # Webots can occasionally mis-place a compound body after resetPhysics();
-        # if the robot centre is below −2 cm we re-place and settle again.
-        if self._robot_node.getPosition()[1] < -0.02:
+        # Guard against two physics glitches that can occur during settle steps:
+        #   1. Robot sinks below ground  (Y < -0.02 m).
+        #   2. Robot tips over / spawns perpendicular to the floor.
+        #      getOrientation() returns a 3×3 row-major rotation matrix.
+        #      m[4] is the Y-Y component: ≈ 1.0 when perfectly upright, → 0
+        #      when tipped ≥ 90°.  Require m[4] > 0.7 (tilt < ~45°).
+        _m      = self._robot_node.getOrientation()
+        _sunk   = self._robot_node.getPosition()[1] < -0.02
+        _tipped = _m[4] < 0.7
+        if _sunk or _tipped:
             self._robot_node.getField("translation").setSFVec3f(
                 [float(rx), 0.0, float(rz)]
+            )
+            self._robot_node.getField("rotation").setSFRotation(
+                [1.0, 0.0, 0.0, -math.pi / 2]
             )
             self._robot_node.setVelocity([0, 0, 0, 0, 0, 0])
             self._robot_node.resetPhysics()
