@@ -2,3 +2,6 @@
 # Results
 controllers/soccer_supervisor/logs
 controllers/soccer_supervisor/checkpoints
+
+# world
+worlds/.soccer.wbproj
