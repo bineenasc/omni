@@ -305,10 +305,44 @@ def play_simulation(
         Runs at real time speed in the 3D window
     """
 
+
     GOAL_Z = FIELD["goal_z_attack"]
     owns_env = env_raw is None
     if owns_env:
         env_raw = SoccerEnv()
+
+    # robot node - if none force it
+    if env_raw.getFromDef("VIPER") is None:
+        print("[play_simulation] VIPER node not found — inserting default robot...")
+        env_raw.getRoot().getField("children").importMFNodeFromString(
+            -1,
+            'DEF VIPER Viper {\n'
+            '  translation 0 0.055 -1\n'
+            '  rotation 1 0 0 -1.5707953071795862\n'
+            '  name "viper"\n'
+            '  controller "robot_controller"\n'
+            '}'
+        )
+        env_raw._robot_node  = env_raw.getFromDef("VIPER")
+        env_raw._active_robot = "viper"
+        env_raw.set_reward_fn("_compute_reward_s3")
+
+        # let the controller initialise
+        for _ in range(10):
+            env_raw._send_action(0.0, 0.0, 0.0)
+            env_raw._sim_step()
+
+    env_raw._robot_node = env_raw.getFromDef("VIPER")
+
+    if env_raw._robot_node is None:
+        raise RuntimeError(
+            "VIPER node still not found after insertion attempt.\n"
+            "Check that the Viper PROTO is declared as EXTERNPROTO in soccer.wbt."
+        )
+    
+
+    # chose Curriculum step
+    env_raw._curriculum_phase = 2
 
     # Switch to real-time so it's watchable
     env_raw.simulationSetMode(env_raw.SIMULATION_MODE_REAL_TIME)
@@ -358,7 +392,7 @@ def play_simulation(
     if owns_env:
         env_raw.close()
 
-    print(f"\n[play_simulation] Done — {ep-1} episodes in {time}s.")
+    print(f"\nSSimulation done: {ep-1} episodes in {time}s")
 
     return None
 
