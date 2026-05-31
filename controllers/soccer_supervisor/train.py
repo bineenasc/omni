@@ -31,10 +31,22 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
+#from controllers.soccer_supervisor.soccer_supervisor import SoccerEnv
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+
+# --- to run multiple combos --- #
+TRAINING_COMBINATIONS: list[tuple[str, str]] = [
+    #("ppo", "_compute_reward_baseline"),
+    ("ppo", "_compute_reward_s1"),
+    #("ppo", "_compute_reward_s2"),
+    #("ppo", "_compute_reward_s3"),
+    #("ppo", "_compute_reward"),
+]
+
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
@@ -65,11 +77,164 @@ _HERE     = os.path.dirname(os.path.abspath(__file__))
 _CKPT_DIR = os.path.join(_HERE, "checkpoints")
 _LOG_DIR  = os.path.join(_HERE, "logs")
 _PLOT_DIR = os.path.join(_HERE, "plots")
-VECNORM_PATH = os.path.join(_CKPT_DIR, "final_model_vecnorm.pkl")
+#VECNORM_PATH = os.path.join(_CKPT_DIR, "final_model_vecnorm.pkl")
 
 
 # ── Main training function ────────────────────────────────────────────────────
 
+
+def train(env_raw) -> None:
+    """
+    For every RLmodel+reward func combo (in TRAINING_COMBINATIONS), 
+    run a full training loop and save the final model
+    
+    -------------
+    Inputs
+        env_raw : SoccerEnv
+            The unwrapped environment passed from soccer_supervisor.py __main__.
+    -------
+    Outputs
+        None
+            the info gathers is saved in the logs/ and plots/ directories, but the PPO model is not returned (since we are not using it for inference in this script)
+    """
+    for d in (_CKPT_DIR, _LOG_DIR, _PLOT_DIR):
+        os.makedirs(d, exist_ok=True)
+ 
+    for algo_tag, reward_fn in TRAINING_COMBINATIONS:
+        reward_label = reward_fn.replace("_compute_reward_", "") #keep suffix (diff between reward names)
+        run_tag = f"{algo_tag}_{reward_label}"
+ 
+        print(f"Starting run: {run_tag}")
+        print(f" --- reward function: {reward_fn} --- ")
+        print(f"{'═'*51}\n")
+ 
+        _train_one(env_raw, algo_tag, reward_fn, run_tag)
+ 
+    print("\n[train] All combinations finished.")
+
+def _train_one(
+        env_raw: SoccerEnv, 
+        algo_tag: str, 
+        reward_fn: str, 
+        run_tag: str
+    ) -> PPO:
+    """
+    Train one (algorithm, reward) combination end-to-end
+    -------------
+    Inputs
+        env_raw : SoccerEnv
+        algo_tag : str
+            e.g. "ppo"
+        reward_fn : str
+        run_tag : str
+            e.g. "ppo_compute_reward_s1"    
+    -------
+    Outputs        
+        model : PPO
+            the final trained model for this combo
+    """
+
+    # --- file paths --- #
+    ckpt_dir = os.path.join(_CKPT_DIR, run_tag)
+    log_dir  = os.path.join(_LOG_DIR,  run_tag)
+    for d in (ckpt_dir, log_dir):
+        os.makedirs(d, exist_ok=True)
+ 
+
+    # --- set reward function & reset curriculum step --- #
+    env_raw.set_reward_fn(reward_fn)
+    env_raw._curriculum_step = 0
+ 
+
+    # --- wrapper stack --- #
+    env = Monitor(env_raw)
+    vec_env = DummyVecEnv([lambda: env])
+    vec_env = VecNormalize(
+        vec_env,
+        norm_obs = False,
+        norm_reward = True,
+        clip_reward = 10.0,
+        gamma = PPO_KWARGS["gamma"],
+    )
+
+    # --- model init --- #
+    # for now only ppo is being used, there is like SAC and TD3 that we can try later if with time... prob not
+    if algo_tag.startswith("ppo"):
+        model = PPO(
+            env             = vec_env,
+            policy_kwargs   = POLICY_KWARGS,
+            tensorboard_log = log_dir,
+            **PPO_KWARGS,
+        )
+    else:
+        raise ValueError(f"Unknown algorithm tag '{algo_tag}'. Only 'ppo' supported.") #for now (trust)
+ 
+    epoch_rewards: list[float] = []
+    epoch_goal_rates: list[float] = []
+ 
+    active_robot: str = ROBOT_SEQUENCE[0]
+    env_raw.set_robot_type(active_robot)
+
+
+    # ------------ #
+    # --- loop --- #
+    # ------------ #
+    for epoch in range(N_EPOCHS):
+        robot_name = ROBOT_SEQUENCE[epoch % len(ROBOT_SEQUENCE)]
+ 
+        if robot_name != active_robot:
+            print(f"\n[{run_tag}] Swapping robot to ===> {robot_name}")
+            env_raw.swap_robot(robot_name)
+            active_robot = robot_name
+ 
+        print(f"\n[{run_tag}] Epoch {epoch+1}/{N_EPOCHS}  "
+              f"robot={robot_name}  | steps_so_far={model.num_timesteps}")
+ 
+        stats_cb = _StatsCallback()
+        try:
+            model.learn(
+                total_timesteps = STEPS_PER_EPOCH,
+                reset_num_timesteps = False,
+                callback = stats_cb,
+                tb_log_name = f"{run_tag}_{robot_name}",
+                progress_bar = True,
+            )
+        finally: # Crash-safe mid-epoch vecnorm snapshot
+            vec_env.save(
+                os.path.join(ckpt_dir,
+                    f"epoch_{epoch:02d}_{robot_name}_vecnorm.pkl")
+            )
+        
+        # Clean end-of-epoch saves
+        stem = os.path.join(ckpt_dir, f"epoch_{epoch:02d}_{robot_name}")
+        model.save(stem)
+        vec_env.save(stem + "_vecnorm.pkl")
+ 
+        if stats_cb.ep_rewards:
+            mean_r = float(np.mean(stats_cb.ep_rewards))
+            goal_rt = float(np.mean(stats_cb.ep_goals))
+        else:
+            mean_r, goal_rt = 0.0, 0.0
+
+
+        epoch_rewards.append(mean_r)
+        epoch_goal_rates.append(goal_rt)
+        print(f"episodes={len(stats_cb.ep_rewards)}"
+              f"    - mean_reward={mean_r:.3f}"
+              f"    - goal_rate={goal_rt:.1%}")
+        
+
+    
+    # --- save final model --- #
+    model.save(os.path.join(ckpt_dir, "final_model"))
+    vec_env.save(os.path.join(ckpt_dir, "final_model_vecnorm.pkl"))
+    print(f"\n[{run_tag}] Done!"
+          f"Final model saved to {ckpt_dir}/final_model.zip")
+ 
+    _plot_curves(epoch_rewards, epoch_goal_rates, run_tag, ROBOT_SEQUENCE)
+    return model
+
+'''
 def train(env_raw) -> PPO:
     """
     Run the full Viper/Titan alternating training loop.
@@ -165,10 +330,14 @@ def train(env_raw) -> PPO:
 
     _plot_curves(epoch_rewards, epoch_goal_rates, N_EPOCHS, ROBOT_SEQUENCE)
     return model
+'''
 
 
-# ── Episode-stats callback ────────────────────────────────────────────────────
+# -------------------- #
+# Callbacks & plotting #
+# -------------------- #
 
+# CALLBACKS #
 class _StatsCallback(BaseCallback):
     """
     Collects per-episode reward and goal-rate within a single learn() call.
@@ -192,9 +361,54 @@ class _StatsCallback(BaseCallback):
         return True
 
 
-# ── Plotting ──────────────────────────────────────────────────────────────────
+# PLOTTING #
 
 def _plot_curves(
+        rewards: list[float],
+        goal_rates: list[float],
+        run_tag: str,
+        robot_seq: list[str],
+    ) -> None:
+    
+    if not rewards:
+        return
+
+    epochs = list(range(1, len(rewards) + 1))
+    colors = [
+        "#246484" if robot_seq[i % len(robot_seq)] == "viper" else "#78130B"
+        for i in range(len(rewards))
+    ]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    fig.suptitle(f"Training curves | {run_tag}  (blue=Viper / red=Titan)")
+
+    for i, (r, c) in enumerate(zip(rewards, colors)):
+        ax1.bar(epochs[i], r, color=c, alpha=0.85, 
+                edgecolor="white", linewidth=0.5)
+    ax1.set_ylabel("Mean episode reward")
+    ax1.axhline(0, color="black", linewidth=0.8, linestyle="--")
+    ax1.grid(axis="y", alpha=0.3)
+
+    for i, (g, c) in enumerate(zip(goal_rates, colors)):
+        ax2.bar(epochs[i], g * 100.0, color=c, alpha=0.85,
+                edgecolor="white", linewidth=0.5)
+    ax2.set_ylabel("Goal rate (%)")
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylim(0, 100)
+    ax2.grid(axis="y", alpha=0.3)
+ 
+    plt.tight_layout()
+    out_path = os.path.join(_PLOT_DIR, f"{run_tag}_curves.png")
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"[{run_tag}] Plot saved → {out_path}")
+
+    return
+
+
+
+
+def _plot_curves_og(
     rewards:    list[float],
     goal_rates: list[float],
     n_epochs:   int,
@@ -206,7 +420,7 @@ def _plot_curves(
 
     epochs = list(range(1, len(rewards) + 1))
     colors = [
-        "#2196F3" if robot_seq[i % len(robot_seq)] == "viper" else "#F44336"
+        "#246484" if robot_seq[i % len(robot_seq)] == "viper" else "#78130B"
         for i in range(len(rewards))
     ]
 
@@ -215,7 +429,7 @@ def _plot_curves(
     for i, (r, c) in enumerate(zip(rewards, colors)):
         ax1.bar(epochs[i], r, color=c, alpha=0.85, edgecolor="white", linewidth=0.5)
     ax1.set_ylabel("Mean episode reward")
-    ax1.set_title("Training curves  —  blue = Viper  /  red = Titan")
+    ax1.set_title("Training curves  -  blue = Viper  /  red = Titan")
     ax1.axhline(0, color="black", linewidth=0.8, linestyle="--")
     ax1.grid(axis="y", alpha=0.3)
 

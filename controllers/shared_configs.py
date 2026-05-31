@@ -11,6 +11,10 @@ All physical constants must match the values declared in the corresponding
 import os
 import sys
 
+# --- SIMULATION TYPE --- #
+MODE = "eval" # "train" or "eval" -> either run train.py or eval.py 
+
+
 # ── Robot configurations ──────────────────────────────────────────────────────
 # Keys must match the Webots robot name (robot.getName() in a controller, or
 # the 'name' field set in the world file).
@@ -78,8 +82,8 @@ SIM = {
 # desync bugs between robot_controller.py and soccer_supervisor.py.
 
 import struct as _struct
-
-IPC = {
+# Inter-Process Communication
+IPC = { 
     "action_channel":  0,
     "sensor_channel":  1,
     "action_fmt":      "3f",
