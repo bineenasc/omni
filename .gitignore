@@ -1,7 +1,7 @@
 
 # Results
-controllers/soccer_supervisor/logs
-controllers/soccer_supervisor/checkpoints
+controllers/soccer_supervisor/logs/
+controllers/soccer_supervisor/checkpoints/
 
 # world
-worlds/.soccer.wbproj
+#worlds/.soccer.wbproj

@@ -127,3 +127,24 @@ project/
 └── results/
     └── leaderboard.csv
 ```
+
+
+-------
+questions:
+-> the robot can have access to the actual coords of objects (ball, goals,…)? what does it see?
+-> is there any processing done to the lidar input?
+-> the goal areas/zones, the 4 points/coords of each are defined/can be assumed? because I couldn't find the x/width only z/depth
+-> what is the IPC what does it do?
+-> the only way the robot distinguishes between won goal and opponent’s is by receiving the distance and direction vector to each?
+-> what is the action space of the robot?
+-> do the ["goal_scored"], ["own_goal"] and ["ball_out"] even counted on rewards or does simulation end before?
+
+Sparse objective
+    Only these are truly positive:
+    scoring
+    meaningful ball contact
+    maybe one small shaping term
+Everything else is:
+    costs
+    penalties
+    opportunity cost
