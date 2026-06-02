@@ -107,8 +107,8 @@ _ROBOT_VRML: dict[str, str] = {
     ),
 }
 
-MAX_LINEAR  = 0.5   # m/s  — scale factor for normalised vx / vz action
-MAX_ANGULAR = 3.0   # rad/s — scale factor for normalised omega action
+MAX_LINEAR  = 0.5   # m/s    scale factor for normalised vx / vz action
+MAX_ANGULAR = 3.0   # rad/s  scale factor for normalised omega action
 
 _N_LIDAR      = IPC["n_lidar"]         # 360
 _SENSOR_FMT   = IPC["sensor_fmt"]      # "i360f"
@@ -123,7 +123,7 @@ class SoccerEnv(Supervisor, gym.Env):
 
     metadata = {"render_modes": []}
 
-    # ──────────────────────────────────────────────────────────────────────────
+    
     def __init__(self) -> None:
         Supervisor.__init__(self)
         gym.Env.__init__(self)
@@ -131,15 +131,15 @@ class SoccerEnv(Supervisor, gym.Env):
         # Run as fast as the CPU allows — no real-time synchronisation.
         self.simulationSetMode(Supervisor.SIMULATION_MODE_FAST)
 
-        self._timestep      = int(self.getBasicTimeStep())   # 8 ms
-        self._steps_per_act = SIM["steps_per_action"]        # 5  → 40 ms/step
-        self._max_steps     = 375 #15 seconds/0.04   //#SIM["max_episode_steps"]       # 2000
+        self._timestep = int(self.getBasicTimeStep()) # 8 ms
+        self._steps_per_act = SIM["steps_per_action"] # 5  → 40 ms/step
+        self._max_steps = 1000 # 40 s / 0.04 s per step
 
-        # ── Webots node handles ────────────────────────────────────────────
+        # Webots node handles
         self._ball_node  = self.getFromDef("BOLA")
         self._robot_node = self.getFromDef("VIPER")
 
-        # ── IPC devices (declared in the Supervisor node in soccer.wbt) ───
+        # IPC devices (declared in the Supervisor node in soccer.wbt) 
         self._emitter  = self.getDevice("supervisor_emitter")
         self._receiver = self.getDevice("supervisor_receiver")
         self._receiver.enable(self._timestep)
@@ -156,9 +156,9 @@ class SoccerEnv(Supervisor, gym.Env):
         #   [13–15]   own-right    post   dist_norm, dir_x, dir_z  (local)
         #   [16–18]   own-left     post   dist_norm, dir_x, dir_z  (local)
         # Pattern per post: [0,1], [-1,1], [-1,1]
-        _post_low  = [0., -1., -1.] * 4   # 12 values for 4 posts
+        _post_low = [0., -1., -1.] * 4 # 12 values for 4 posts
         _post_high = [1.,  1.,  1.] * 4
-        _obs_low  = np.array(
+        _obs_low = np.array(
             [0., 0., -1., -1., 0., -1., -1.] + _post_low,  dtype=np.float32
         )
         _obs_high = np.array(
@@ -172,30 +172,31 @@ class SoccerEnv(Supervisor, gym.Env):
         )
 
         # Episode state 
-        self._active_robot        : str   = "viper"
-        self._step_count          : int   = 0
-        self._still_steps         : int   = 0
-        self._last_lidar          = np.ones(_N_LIDAR, dtype=np.float32)
-        self._prev_dist_ball      : float = FIELD_DIAG
-        self._prev_dist_ball_goal : float = FIELD_DIAG
-        self._prev_robot_pos      : tuple = (0.0, 0.0)
-        self._prev_ball_z         : float = 0.0   # z da bola no passo anterior
-        self._rng                         = np.random.default_rng()
+        self._active_robot: str          = "viper"
+        self._step_count: int            = 0
+        self._still_steps: int           = 0
+        self._last_lidar                 = np.ones(_N_LIDAR, dtype=np.float32)
+        self._prev_dist_ball: float      = FIELD_DIAG
+        self._prev_dist_ball_goal: float = FIELD_DIAG
+        self._prev_robot_pos: tuple      = (0.0, 0.0)
+        self._prev_ball_z: float         = 0.0   # z da bola no passo anterior
+        self._rng                        = np.random.default_rng()
 
 
         # Curriculum de posições 
         self._curriculum_step : int = 0
 
+        # if we wanna change not after n steps but after x success rate
         self._curriculum_phase: int = 0
         self._CURRICULUM_WINDOW: int = 10
         self._CURRICULUM_THRESH: float = 0.60 # 6/10 to advance
         self._curriculum_outcomes: deque = deque(maxlen=self._CURRICULUM_WINDOW)
 
-        # ── Bônus de meio campo (uma vez por episódio) ─────────────────────
+        # Bônus de meio campo (uma vez por episódio)
         # Dado quando a bola cruza de z<0 para z>0 (campo de ataque)
         self._midfield_bonus_given : bool = False
 
-        # ── Histórico de posições para penalidade de 10 segundos ──────────
+        # Histórico de posições para penalidade de 10 segundos 
         # 10 s ÷ 40 ms/step = 250 steps
         _WINDOW = 250
         self._pos_history : deque = deque(maxlen=_WINDOW)
@@ -220,11 +221,69 @@ class SoccerEnv(Supervisor, gym.Env):
 
         self._step_count = 0
         self._still_steps = 0
+        self._post_stuck_steps = 0
         self._midfield_bonus_given = False
         self._pos_history.clear()
 
         # --- Curriculum de posições --- #
-        cs = self._curriculum_phase
+        # Fase 1a (0–30k)   : bola a 5–20 cm do gol, dentro das traves → gol quase garantido
+        # Fase 1b (30k–100k): bola a 0.5–1.5 m do gol, robô logo atrás
+        # Fase 2 (100k–300k): bola no campo de ataque (z>0), robô aleatório
+        # Fase 3 (300k+)    : completamente aleatório
+        cs = self._curriculum_step
+        _gz  = FIELD["goal_z_attack"]    # 4.55
+        _ghw = FIELD["goal_half_width"]  # 0.75
+
+        # Phase boundaries align with the epoch schedule (60k steps/epoch, 26 epochs):
+        #   Phase 1a: epochs 0–1   (1× Viper + 1× Titan)  →   0 – 120k steps
+        #   Phase 1b: epochs 2–3   (1× Viper + 1× Titan)  → 120k – 240k steps
+        #   Phase 2:  epochs 4–5   (1× Viper + 1× Titan)  → 240k – 360k steps
+        #   Phase 3:  epochs 6–25  (10× Viper + 10× Titan) →  360k+ steps
+
+        if cs < 120_000:
+            # Phase 1a — trivial: ball almost inside the goal.
+            # Any touch in +Z scores → PPO finds the +300 signal quickly.
+            bz = self._rng.uniform(_gz - 0.20, _gz - 0.05)    # 4.35 → 4.50
+            bx = self._rng.uniform(-_ghw * 0.70, _ghw * 0.70) # within posts
+            rz = float(bz) - self._rng.uniform(0.15, 0.40)
+            rx = float(bx) + self._rng.uniform(-0.15, 0.15)
+
+        elif cs < 240_000:
+            # Phase 1b — easy: ball 0.5–1.5 m from goal, robot just behind ball
+            bz = self._rng.uniform(_gz - 1.50, _gz - 0.50)    # 3.05 → 4.05
+            bx = self._rng.uniform(-_ghw, _ghw)
+            rz_max = float(bz) - 0.20
+            rz_min = max(float(bz) - 1.20, 0.0)
+            rz = self._rng.uniform(rz_min, rz_max)
+            rx = float(bx) + self._rng.uniform(-0.30, 0.30)
+
+        elif cs < 360_000:
+            # Phase 2 — medium: ball in the attack half (z > 0), robot anywhere
+            bz = self._rng.uniform(0.0, FIELD["half_length"] * 0.80)
+            bx = self._rng.uniform(-FIELD["half_width"] * 0.60,
+                                    FIELD["half_width"] * 0.60)
+            rz_max = max(float(bz) - 0.20, -0.20)
+            rz = self._rng.uniform(-FIELD["half_length"] * 0.85, rz_max)
+            rx = self._rng.uniform(-FIELD["half_width"] * 0.70,
+                                    FIELD["half_width"] * 0.70)
+
+        else:
+            # Phase 3 — fully random: both robot and ball anywhere on the field
+            bx = self._rng.uniform(-FIELD["half_width"]  * 0.60,
+                                    FIELD["half_width"]  * 0.60)
+            bz = self._rng.uniform(-FIELD["half_length"] * 0.40,
+                                    FIELD["half_length"] * 0.40)
+            rx = self._rng.uniform(-FIELD["half_width"]  * 0.70,
+                                    FIELD["half_width"]  * 0.70)
+            rz = self._rng.uniform(-FIELD["half_length"] * 0.85, -0.5)
+
+        self._ball_node.getField("translation").setSFVec3f(
+            [float(bx), BALL["radius"], float(bz)]
+        )
+        self._ball_node.setVelocity([0, 0, 0, 0, 0, 0])
+        self._ball_node.resetPhysics()
+
+        '''cs = self._curriculum_phase
         _gz  = FIELD["goal_z_attack"]    # 4.55
         _ghw = FIELD["goal_half_width"]  # 0.75
 
@@ -269,7 +328,7 @@ class SoccerEnv(Supervisor, gym.Env):
             rx = self._rng.uniform(-FIELD["half_width"]  * 0.70,
                                     FIELD["half_width"]  * 0.70)
             rz = self._rng.uniform(-FIELD["half_length"] * 0.85, -0.5)
-
+        '''
 
         # --- BALL --- #
         if self._ball_node is None:
@@ -290,7 +349,7 @@ class SoccerEnv(Supervisor, gym.Env):
 
         # ── Randomise robot (own half: z < 0) ─────────────────────────────
         self._robot_node.getField("translation").setSFVec3f(
-            [float(rx), 0.055, float(rz)] # try prevent robot from clipping through the ground
+            [float(rx), 0.0, float(rz)] 
         )
         # Restore the standard -90° X rotation that orients the proto in NUE
         self._robot_node.getField("rotation").setSFRotation(
@@ -304,20 +363,43 @@ class SoccerEnv(Supervisor, gym.Env):
             self._send_action(0.0, 0.0, 0.0)
             self._sim_step()
 
+        # Guard against two physics glitches that can occur during settle steps:
+        #   1. Robot sinks below ground  (Y < -0.02 m).
+        #   2. Robot tips over / spawns perpendicular to the floor.
+        #      getOrientation() returns a 3×3 row-major rotation matrix.
+        #      m[4] is the Y-Y component: ≈ 1.0 when perfectly upright, → 0
+        #      when tipped ≥ 90°.  Require m[4] > 0.7 (tilt < ~45°).
+        _m = self._robot_node.getOrientation()
+        _sunk = self._robot_node.getPosition()[1] < -0.02
+        _tipped = _m[4] < 0.7
+        if _sunk or _tipped:
+            self._robot_node.getField("translation").setSFVec3f(
+                [float(rx), 0.0, float(rz)]
+            )
+            self._robot_node.getField("rotation").setSFRotation(
+                [1.0, 0.0, 0.0, -math.pi / 2]
+            )
+            self._robot_node.setVelocity([0, 0, 0, 0, 0, 0])
+            self._robot_node.resetPhysics()
+            for _ in range(5):
+                self._send_action(0.0, 0.0, 0.0)
+                self._sim_step()
+
         self._drain_receiver()  # discard lidar from settle steps
 
         # ── Compute initial distances ──────────────────────────────────────
         ball_pos = _flat(self._ball_node)
-        obs      = self._get_obs()
+        obs = self._get_obs()
 
-        self._prev_dist_ball      = float(obs[1]) * FIELD_DIAG
+        self._prev_dist_ball = float(obs[1]) * FIELD_DIAG
         self._prev_dist_ball_goal = math.hypot(
             ball_pos[0], ball_pos[1] - FIELD["goal_z_attack"]
         )
         self._prev_robot_pos = _flat(self._robot_node)
-        self._prev_ball_z    = ball_pos[1]
+        self._prev_ball_z = ball_pos[1]
 
         return obs, {}
+
 
     # ──────────────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray) -> tuple:
@@ -345,7 +427,7 @@ class SoccerEnv(Supervisor, gym.Env):
         # Events & terminal flags 
         events = self._check_events(ball_pos)
         terminated = events["goal_scored"] or events["own_goal"] or events["ball_out"]
-        truncated = self._step_count >= self._max_steps
+        truncated = (self._step_count >= self._max_steps) or (self._post_stuck_steps > 100) 
 
         # Reward 
         '''reward = self._compute_reward(
@@ -362,8 +444,8 @@ class SoccerEnv(Supervisor, gym.Env):
         self._prev_ball_z = ball_pos[1]
         self._curriculum_step += 1
 
-        # --- Update Curriculum Step --- #
-        if terminated:
+        # --- Update Curriculum Step --- # # only if using pass to next step after models has x accuracy in current one
+        '''if terminated:
             self._curriculum_outcomes.append(1 if events["goal_scored"] else 0)
 
             window_full = len(self._curriculum_outcomes) == self._CURRICULUM_WINDOW
@@ -377,7 +459,7 @@ class SoccerEnv(Supervisor, gym.Env):
                         f"[Curriculum] Phase change: {self._curriculum_phase - 1} -> {self._curriculum_phase}\n"
                         f"    goal rate {goal_rate:.0%} over last {self._CURRICULUM_WINDOW} episodes\n"
                         f"    {self._CURRICULUM_WINDOW} episodes)"
-                    )
+                    )'''
         
 
         info = {**events, "step": self._step_count}
@@ -388,15 +470,15 @@ class SoccerEnv(Supervisor, gym.Env):
     # ══════════════════════════════════════════════════════════════════════════
 
     def _get_obs(self) -> np.ndarray:
-        cfg       = get_robot_config(self._active_robot)
+        cfg = get_robot_config(self._active_robot)
         robot_pos = _flat(self._robot_node)
-        ball_pos  = _flat(self._ball_node)
-        goal_pos  = (0.0, float(FIELD["goal_z_attack"]))
+        ball_pos = _flat(self._ball_node)
+        goal_pos = (0.0, float(FIELD["goal_z_attack"]))
 
         # ── Heading do robô para rotacionar para frame local ───────────────
-        heading    = self._get_heading()
-        cos_h      = math.cos(heading)
-        sin_h      = math.sin(heading)
+        heading = self._get_heading()
+        cos_h = math.cos(heading)
+        sin_h = math.sin(heading)
 
         dist_ball, dir_ball_w = _vec2d(robot_pos, ball_pos)
         dist_goal, dir_goal_w = _vec2d(robot_pos, goal_pos)
@@ -465,467 +547,124 @@ class SoccerEnv(Supervisor, gym.Env):
     # Reward
     # ══════════════════════════════════════════════════════════════════════════
     
-    def _compute_reward_baseline(
-            self,
-            dist_ball: float,
-            ball_pos: tuple,
-            robot_pos: tuple,
-            events: dict,
-    )-> float:
-        # this is supose to be a baseline - simplest reward
-        #deduct time, proximity to ball & score goal
-
-        # --------------- #
-        # TERMINAL EVENTS #
-        # --------------- #
-
-        if events["goal_scored"]:
-            print("GOAL SCORED!")
-            return +100.0
-        if events["own_goal"]:
-            return -100.0
-        if events["ball_out"]:
-            return -50.0
-        
-        # --------- #
-        # Over Time #
-        # --------- #
-        reward = 0.0
-
-        # --- time penalty --- #
-        reward -= 0.01
-
-        # --- dist to ball penalty --- #
-        reward -= 0.05 * dist_ball
-
-        return reward
-    
-    def _compute_reward_s1( #s - simple 1 - frist adapt from bseline
-            self,
-            dist_ball: float,
-            ball_pos: tuple,
-            robot_pos: tuple,
-            events: dict,
-    )-> float:
-        # adds more ball relevance- ponts deducted by how far away it is from goal
-
-        # --------------- #
-        # TERMINAL EVENTS #
-        # --------------- #
-
-        if events["goal_scored"]:
-            print("GOAL SCORED!")
-            return +100.0
-        if events["own_goal"]:
-            return -100.0
-        if events["ball_out"]:
-            return -50.0
-        
-        # --------- #
-        # Over Time #
-        # --------- #
-        reward = 0.0
-
-        # --- time penalty --- #
-        reward -= 0.01
-
-        # --- dist to ball penalty --- #
-        reward -= 0.05 * dist_ball
-
-        # --- dist ball to goal penalty --- #
-        dist_ball_goal = math.hypot(ball_pos[0], ball_pos[1] - FIELD["goal_z_attack"])
-        reward -= 0.05 * dist_ball_goal
-
-        return reward
-
-
-    def _compute_reward_s2(
+    def _compute_reward_2(
         self,
         dist_ball: float,
         ball_pos: tuple,
         robot_pos: tuple,
+        moved: float,
         events: dict,
     ) -> float:
-        """ 
-        1. SCORE GOAL                       | (dominant objective)
-        2. MOVE BALL TOWARD GOAL            | (main shaping)
-        3. GET INTO GOOD STRIKING POSITION  |
-        4. REACH BALL                       |
-        5. AVOID USELESS / STALLED MOTION   |
         """
-        
-        # --------------- #
-        # TERMINAL EVENTS #
-        # --------------- #
-
+        Reward hierarchy (dominant first):
+          1. Score goal          → dominant terminal signal (+300 / -200 / -100)
+          2. Ball toward goal    → main dense shaping
+          3. Robot reaches ball  → prerequisite shaping
+          4. Positioning         → alignment / behind-ball bonuses
+          5. Anti-stall          → stillness, no-progress, post-stuck penalties
+        """
+        # ── 1. TERMINAL EVENTS ──────────────────────────────────────────────────
         if events["goal_scored"]:
-            print("GOAL SCORED!")
-            return +100.0
+            return +300.0
         if events["own_goal"]:
-            return -100.0
+            return -200.0
         if events["ball_out"]:
-            return -50.0
+            return -100.0
 
-        # --------- #
-        # Over Time #
-        # --------- #
-        
-        # --- calcs --- #
-        TOUCH_THRESHOLD = 0.16
-        GOAL_Z = FIELD["goal_z_attack"]
-        bx, bz = ball_pos
-        rx, rz = robot_pos
-        reward = 0.0
+        bx, bz   = ball_pos
+        rx, rz   = robot_pos
+        GOAL_Z   = FIELD["goal_z_attack"]
+        TOUCH_TH = 0.16
+        reward   = 0.0
 
+        # ── 2. TIME PENALTY ──────────────────────────────────────────────────────
+        reward -= 0.003
 
+        # ── 3. MIDFIELD BONUS (once per episode) ─────────────────────────────────
+        if not self._midfield_bonus_given and self._prev_ball_z < 0.0 and bz >= 0.0:
+            self._midfield_bonus_given = True
+            reward += 1.0
 
-        # --- time penalty --- #
-        reward -= 0.01
+        # ── 4. ROBOT → BALL PROGRESS ─────────────────────────────────────────────
+        reward += (self._prev_dist_ball - dist_ball) * 3.0
 
-        # --- dist to ball penalty --- #
-        reward -= 0.05 * dist_ball
+        # ── 5. BALL → GOAL PROGRESS ──────────────────────────────────────────────
+        dist_ball_goal = math.hypot(bx, bz - GOAL_Z)
+        reward += (self._prev_dist_ball_goal - dist_ball_goal) * 15.0
 
-        # --- dist ball to goal penalty --- #
-        dist_ball_goal = math.hypot(ball_pos[0], ball_pos[1] - FIELD["goal_z_attack"])
-        reward -= 0.05 * dist_ball_goal
+        # ── 6. BALL VELOCITY TOWARD GOAL ─────────────────────────────────────────
+        try:
+            vel = self._ball_node.getVelocity()
+            ball_vx, ball_vz = vel[0], vel[2]
+            to_goal_x, to_goal_z = -bx, GOAL_Z - bz
+            norm = math.hypot(to_goal_x, to_goal_z)
+            if norm > 1e-6:
+                to_goal_x /= norm
+                to_goal_z /= norm
+                toward_goal = ball_vx * to_goal_x + ball_vz * to_goal_z
+                reward += float(np.clip(toward_goal * 0.8, -1.0, 1.0))
+        except Exception:
+            pass
 
+        # ── 7. ROBOT BEHIND BALL ─────────────────────────────────────────────────
+        if rz < bz:
+            reward += 0.05
+        else:
+            reward -= 0.05
 
-        # --- ball direction & speed towords goal area --- #
-        # adds based on vector velocity of ball
-
-
-
-        # --- ball between robot and goal --- #
-        if rz>bz: reward -= 0.1
-
-        
-        
-        # --- position penalties/rewards --- #
-        '''if (bz <= 0.0): 
-            reward -= 1.0'''
-
-        # --- if alighned with ball and goal --- #
-        '''rb_x, rb_z = bx - rx, bz - rz
-        rb_norm    = math.hypot(rb_x, rb_z)
-
+        # ── 8. ROBOT–BALL–GOAL ALIGNMENT ─────────────────────────────────────────
+        rb_x, rb_z = bx - rx, bz - rz
+        rb_norm = math.hypot(rb_x, rb_z)
         if rb_norm > 1e-6:
             rb_x /= rb_norm
             rb_z /= rb_norm
             bg_x, bg_z = -bx, GOAL_Z - bz
-            bg_norm    = math.hypot(bg_x, bg_z)
-            if bg_norm > 1e-6:
-                bg_x /= bg_norm
-                bg_z /= bg_norm
-                alignment = rb_x * bg_x + rb_z * bg_z
-                reward   += alignment * 0.2
-        '''
-
-        # --- contact bonus & cooldown --- #
-        if dist_ball < TOUCH_THRESHOLD:
-            reward += 0.5
-            '''if (self._step_count - getattr(self, "_last_touch_step", -999)) > 8:
-                reward += 0.03
-                self._last_touch_step = self._step_count'''
-
-
-
-        # --- stillness penalty - ball reached so nothing else to do - --- #
-        try:
-            robot_vel   = self._robot_node.getVelocity()
-            robot_speed = math.hypot(robot_vel[0], robot_vel[2])
-            ball_vel    = self._ball_node.getVelocity()
-            ball_speed  = math.hypot(ball_vel[0], ball_vel[2])
-            if dist_ball < 0.25 and ball_speed < 0.03 and robot_speed < 0.03:
-                reward -= 0.18   # robot AND ball both stationary near each other
-        except Exception:
-            pass
-        
-            
-        return reward
-
-    def _compute_reward_s3(
-        self,
-        dist_ball: float,
-        ball_pos: tuple,
-        robot_pos: tuple,
-        events: dict,
-    ) -> float:
-
-        # ---------------- #
-        # TERMINAL REWARD  #
-        # ---------------- #
-
-        if events["goal_scored"]:
-            print("GOAL SCORED!")
-            return 150.0
-
-        if events["own_goal"]:
-            return -100.0
-
-        if events["ball_out"]:
-            return -50.0
-
-        # ---------------- #
-        # CONSTANTS        #
-        # ---------------- #
-
-        TOUCH_THRESHOLD = 0.16
-        GOAL_Z = FIELD["goal_z_attack"]
-
-        bx, bz = ball_pos
-        rx, rz = robot_pos
-
-        reward = 0.0
-
-        # ---------------- #
-        # TIME PENALTY     #
-        # ---------------- #
-
-        reward -= 0.01
-
-        # ---------------- #
-        # APPROACH BALL    #
-        # ---------------- #
-
-        # progress reward
-        reward += (
-            self._prev_dist_ball
-            - dist_ball
-        ) * 2.0
-
-        # small shaping penalty
-        reward -= 0.03 * dist_ball
-
-        # ---------------- #
-        # BALL -> GOAL     #
-        # ---------------- #
-
-        dist_ball_goal = math.hypot(
-            bx,
-            bz - GOAL_Z
-        )
-
-        ball_progress = (
-            self._prev_dist_ball_goal
-            - dist_ball_goal
-        )
-
-        reward += ball_progress * 8.0
-
-        # ---------------- #
-        # ROBOT BEHIND BALL#
-        # ---------------- #
-
-        # goal is +Z
-        if rz > bz:
-            reward -= 0.1
-
-        # ---------------- #
-        # BALL VELOCITY    #
-        # ---------------- #
-
-        try:
-            ball_vel = self._ball_node.getVelocity()
-
-            vx = ball_vel[0]
-            vz = ball_vel[2]
-
-            ball_speed = math.hypot(vx, vz)
-
-            # unit vector ball -> goal
-            to_goal_x = -bx
-            to_goal_z = GOAL_Z - bz
-
-            norm = math.hypot(
-                to_goal_x,
-                to_goal_z
-            )
-
-            if norm > 1e-6:
-
-                to_goal_x /= norm
-                to_goal_z /= norm
-
-                toward_goal_speed = (
-                    vx * to_goal_x +
-                    vz * to_goal_z
-                )
-
-                # reward motion toward goal
-                reward += max(
-                    0.0,
-                    toward_goal_speed
-                ) * 1.5
-
-                # kick bonus only when near ball
-                if dist_ball < TOUCH_THRESHOLD:
-
-                    reward += max(
-                        0.0,
-                        toward_goal_speed
-                    ) * 0.75
-
-        except Exception:
-            pass
-
-        # ---------------- #
-        # ALIGNMENT BONUS  #
-        # ---------------- #
-
-        rb_x = bx - rx
-        rb_z = bz - rz
-
-        rb_norm = math.hypot(rb_x, rb_z)
-
-        if rb_norm > 1e-6:
-
-            rb_x /= rb_norm
-            rb_z /= rb_norm
-
-            bg_x = -bx
-            bg_z = GOAL_Z - bz
-
             bg_norm = math.hypot(bg_x, bg_z)
-
             if bg_norm > 1e-6:
-
                 bg_x /= bg_norm
                 bg_z /= bg_norm
+                reward += (rb_x * bg_x + rb_z * bg_z) * 0.3
 
-                alignment = (
-                    rb_x * bg_x +
-                    rb_z * bg_z
-                )
+        # ── 9. CONTACT BONUS WITH COOLDOWN ───────────────────────────────────────
+        if dist_ball < TOUCH_TH:
+            if (self._step_count - getattr(self, "_last_touch_step", -999)) > 8:
+                reward += 0.25
+                self._last_touch_step = self._step_count
 
-                reward += alignment * 0.05
-
-        # ---------------- #
-        # TOUCH BONUS      #
-        # ---------------- #
-
-        if dist_ball < TOUCH_THRESHOLD:
-            reward += 0.1
-
-        # ---------------- #
-        # STALL PENALTY    #
-        # ---------------- #
-
+        # ── 10. BALL-HOVER PENALTY (near ball but ball not moving) ────────────────
         try:
-
-            robot_vel = self._robot_node.getVelocity()
-            robot_speed = math.hypot(
-                robot_vel[0],
-                robot_vel[2]
-            )
-
-            ball_vel = self._ball_node.getVelocity()
-            ball_speed = math.hypot(
-                ball_vel[0],
-                ball_vel[2]
-            )
-
-            if (
-                dist_ball < 0.25
-                and robot_speed < 0.03
-                and ball_speed < 0.03
-            ):
-                reward -= 0.2
-
+            ball_speed = math.hypot(*self._ball_node.getVelocity()[:3:2])
+            if dist_ball < 0.25 and ball_speed < 0.03:
+                reward -= 0.05
         except Exception:
             pass
 
-        return float(reward)
-
-    def _compute_reward(
-        self,
-        dist_ball : float,
-        ball_pos  : tuple,
-        robot_pos : tuple,
-        events    : dict,
-    ) -> float:
-
-        # 1. Terminal events — dominant signal, early return
-        if events["goal_scored"]:
-            return 50.0     # aumentado de 10 para 50 — gol deve dominar o sinal
-        if events["own_goal"]:
-            return -30.0    # aumentado de -8 para -30
-        if events["ball_out"]:
-            return -2.0     # ball left the field without scoring
-
-        reward = 0.0
-
-        # 2. Progress of robot toward ball
-        reward += (self._prev_dist_ball - dist_ball) * 2.0
-
-        # 3. Proximidade contínua à bola — sinal denso para a rede de valor aprender.
-        # Decai linearmente: +0.03 quando tocando a bola, → 0 na outra ponta do campo.
-        # Máximo acumulado: 1500 × 0.03 = +45/episódio < gol (+50) → hierarquia correta.
-        # Substitui o bônus de contato binário (+0.3 fixo) que causava hover.
-        reward += 0.03 * (1.0 - min(dist_ball, FIELD_DIAG) / FIELD_DIAG)
-
-        # 4. Progress of ball toward attack goal — escalado pela proximidade do robô.
-        # O fator de proximidade força a sequência: ir até a bola → empurrar pro gol.
-        # Sem essa escala, o robô pode ganhar reward de "bola avançando" sem estar perto,
-        # e aprende a ficar parado esperando a bola rolar sozinha.
-        #
-        # fator = 1.0 quando tocando a bola, 0.0 quando dist ≥ _GOAL_PROX_SCALE.
-        _GOAL_PROX_SCALE = 2.0   # metros — raio de influência do robô sobre a bola
-        prox_factor = max(0.0, 1.0 - dist_ball / _GOAL_PROX_SCALE)
-        dist_ball_to_goal = math.hypot(
-            ball_pos[0], ball_pos[1] - FIELD["goal_z_attack"]
-        )
-        # Clipa para nunca ser negativo: empurrar a bola para o lado é neutro (0),
-        # empurrar para o gol é bom (+). Sem o clip, empurrar na direção errada
-        # dava reward negativo, e o robô aprendia a NÃO tocar na bola.
-        goal_progress = self._prev_dist_ball_goal - dist_ball_to_goal
-        reward += max(0.0, goal_progress) * 10.0 * prox_factor
-
-        # 4. Bônus de meio campo — +0.5 uma vez por episódio quando a bola
-        # cruza de z<0 (campo defensivo) para z>0 (campo de ataque).
-        # Cria um degrau intermediário: aproximar → cruzar → marcar.
-        if (not self._midfield_bonus_given
-                and self._prev_ball_z < 0.0
-                and ball_pos[1] >= 0.0):
-            self._midfield_bonus_given = True
-            reward += 0.5
-
-        # 5. Ball velocity component directed toward goal
-        reward += _ball_toward_goal_bonus(
-            self._ball_node, ball_pos, FIELD["goal_z_attack"]
-        )
-
-        # (bônus de alinhamento removido — sinal muito fraco, só adicionava ruído)
-
-        # 6. Stillness penalty — encourages the robot to keep moving
-        moved = math.hypot(
-            robot_pos[0] - self._prev_robot_pos[0],
-            robot_pos[1] - self._prev_robot_pos[1],
-        )
+        # ── 11. ROBOT STILLNESS PENALTY ──────────────────────────────────────────
         if moved < 0.003:
             self._still_steps += 1
-            if self._still_steps > 30:
-                reward -= 0.05
+            if self._still_steps > 20:      # trigger after ~0.8 s motionless
+                reward -= 0.10
         else:
             self._still_steps = 0
 
-        # 7. Penalidade por falta de progresso em 10 segundos
-        # Guarda posição atual no histórico e compara com a posição de 250 passos atrás.
-        # Se o deslocamento líquido for menor que 30cm, o robô está preso/oscilando.
+        # ── 12. LONG-RANGE NO-PROGRESS PENALTY ───────────────────────────────────
         self._pos_history.append(robot_pos)
         if len(self._pos_history) == self._NO_PROGRESS_WINDOW:
             old_pos = self._pos_history[0]
-            net_displacement = math.hypot(
+            net_disp = math.hypot(
                 robot_pos[0] - old_pos[0],
                 robot_pos[1] - old_pos[1],
             )
-            if net_displacement < self._NO_PROGRESS_THRESH:
-                reward += self._NO_PROGRESS_PENALTY
+            if net_disp < self._NO_PROGRESS_THRESH:
+                reward += self._NO_PROGRESS_PENALTY  # -0.05
 
-        # 8. Per-step time penalty
-        reward -= 0.001
+        # ── 13. GOAL-POST STUCK PENALTY ──────────────────────────────────────────
+        if self._post_stuck_steps > 20:
+            reward -= 0.30
 
-        return float(reward)
+        return reward
 
+    
     # ══════════════════════════════════════════════════════════════════════════
     # Terminal conditions
     # ══════════════════════════════════════════════════════════════════════════
@@ -936,12 +675,12 @@ class SoccerEnv(Supervisor, gym.Env):
 
         # Ball inside goal mouth (crosses the goal-line within the post width)
         goal_scored = bz >= FIELD["goal_z_attack"] and abs(bx) <= hw
-        own_goal    = bz <= FIELD["goal_z_own"]    and abs(bx) <= hw
+        own_goal = bz <= FIELD["goal_z_own"] and abs(bx) <= hw
 
         # Ball outside the pitch (side lines or end lines that are NOT goals)
         ball_out = (
-            abs(bx) > FIELD["half_width"]  + 0.05               # side out
-            or (bz >=  FIELD["goal_z_attack"] and not goal_scored)  # end line, missed goal
+            abs(bx) > FIELD["half_width"]  + 0.05                    # side out
+            or (bz >=  FIELD["goal_z_attack"] and not goal_scored)   # end line, missed goal
             or (bz <= FIELD["goal_z_own"]    and not own_goal)       # own end, missed
         )
 
@@ -950,6 +689,19 @@ class SoccerEnv(Supervisor, gym.Env):
             "own_goal":    own_goal,
             "ball_out":    ball_out,
         }
+    
+    def _is_near_post(self, robot_pos: tuple) -> bool:
+        """Return True if the robot centre is within 0.30 m of any goal post."""
+        hw = FIELD["goal_half_width"]
+        for px, pz in (
+            ( hw, FIELD["goal_z_attack"]),
+            (-hw, FIELD["goal_z_attack"]),
+            ( hw, FIELD["goal_z_own"]),
+            (-hw, FIELD["goal_z_own"]),
+        ):
+            if math.hypot(robot_pos[0] - px, robot_pos[1] - pz) < 0.30:
+                return True
+        return False
 
     # ══════════════════════════════════════════════════════════════════════════
     # IPC helpers
@@ -974,13 +726,13 @@ class SoccerEnv(Supervisor, gym.Env):
             self._receiver.nextPacket()
 
         if latest is not None:
-            vals  = struct.unpack(_SENSOR_FMT, latest)
-            arr   = np.array(vals[1:], dtype=np.float32)
+            vals = struct.unpack(_SENSOR_FMT, latest)
+            arr = np.array(vals[1:], dtype=np.float32)
             max_r = get_robot_config(self._active_robot)["lidar_max_range"]
             self._last_lidar = np.clip(arr / max_r, 0.0, 1.0)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Robot hot-swap (used by train.py for epoch alternation — Step 8)
+    # Reward hot-swap (used by train.py when training multiple configurations)
     # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -1012,7 +764,9 @@ class SoccerEnv(Supervisor, gym.Env):
         return fn(dist_ball, ball_pos, robot_pos, events)
 
 
-
+    # ══════════════════════════════════════════════════════════════════════════
+    # Robot hot-swap (used by train.py for epoch alternation — Step 8)
+    # ══════════════════════════════════════════════════════════════════════════
 
     def set_robot_type(self, robot_name: str) -> None:
         """Update the active robot label (type_id in obs) without a physical swap."""
@@ -1052,7 +806,7 @@ class SoccerEnv(Supervisor, gym.Env):
         )
 
         # Refresh node reference
-        self._robot_node  = self.getFromDef("VIPER")
+        self._robot_node = self.getFromDef("VIPER")
         self._active_robot = robot_name
 
         # Let the new controller initialise and lidar warm up
@@ -1114,16 +868,16 @@ def _vec2d(
     unit_vector is (0, 0) when distance < 1e-6.
     """
     dx, dz = b[0] - a[0], b[1] - a[1]
-    dist   = math.hypot(dx, dz)
+    dist = math.hypot(dx, dz)
     if dist > 1e-6:
         return dist, (dx / dist, dz / dist)
     return 0.0, (0.0, 0.0)
 
 
 def _alignment_bonus(
-    ball_pos  : tuple[float, float],
-    robot_pos : tuple[float, float],
-    goal_z    : float,
+    ball_pos: tuple[float, float],
+    robot_pos: tuple[float, float],
+    goal_z: float,
 ) -> float:
     """
     Returns +0.05 when the ball lies within 30 cm of the straight line
@@ -1149,9 +903,9 @@ def _alignment_bonus(
 
 
 def _ball_toward_goal_bonus(
-    ball_node : object,
-    ball_pos  : tuple[float, float],
-    goal_z    : float,
+    ball_node: object,
+    ball_pos: tuple[float, float],
+    goal_z: float,
 ) -> float:
     """
     Proportional reward for the component of ball velocity directed toward
@@ -1162,7 +916,7 @@ def _ball_toward_goal_bonus(
     except Exception:
         return 0.0
 
-    bx, bz    = ball_pos
+    bx, bz = ball_pos
     to_x, to_z = 0.0 - bx, goal_z - bz
     dist = math.hypot(to_x, to_z)
     if dist < 1e-6:

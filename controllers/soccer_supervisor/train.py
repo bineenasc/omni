@@ -41,18 +41,19 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 # --- to run multiple combos --- #
 TRAINING_COMBINATIONS: list[tuple[str, str]] = [
     #("ppo", "_compute_reward_baseline"),
-    ("ppo", "_compute_reward_s1"),
+    #("ppo", "_compute_reward_s1"),
     #("ppo", "_compute_reward_s2"),
     #("ppo", "_compute_reward_s3"),
     #("ppo", "_compute_reward"),
+    ("ppo", "_compute_reward_2"),
 ]
 
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
-N_EPOCHS        = 20
-STEPS_PER_EPOCH = 30_000          # Webots env steps (not Webots basic timesteps)
-ROBOT_SEQUENCE  = ["viper", "titan"]
+N_EPOCHS = 26 # even number -> 13 epochs each for Viper and Titan, 
+STEPS_PER_EPOCH = 60_000 # Webots env steps (not Webots basic timesteps)
+ROBOT_SEQUENCE = ["viper", "titan"]
 
 # No CNN extractor — observation is now a flat 19-dim vector (MlpPolicy handles it).
 # Larger layers than before because the network sees goal-post geometry directly.
@@ -101,7 +102,7 @@ def train(env_raw) -> None:
         os.makedirs(d, exist_ok=True)
  
     for algo_tag, reward_fn in TRAINING_COMBINATIONS:
-        reward_label = reward_fn.replace("_compute_reward_", "") #keep suffix (diff between reward names)
+        reward_label = reward_fn.replace("_compute_reward_", "") # keep suffix (diff between reward names)
         run_tag = f"{algo_tag}_{reward_label}"
  
         print(f"Starting run: {run_tag}")
@@ -350,18 +351,20 @@ class _StatsCallback(BaseCallback):
     def __init__(self) -> None:
         super().__init__(verbose=0)
         self.ep_rewards: list[float] = []
-        self.ep_goals:   list[float] = []   # 1.0 if episode ended with a goal
+        self.ep_goals: list[float] = []   # 1.0 if episode ended with a goal
 
     def _on_step(self) -> bool:
         for info in self.locals.get("infos", []):
             ep = info.get("episode")
-            if ep is not None:                             # terminal step
+            if ep is not None: # terminal step
                 self.ep_rewards.append(ep["r"])
                 self.ep_goals.append(1.0 if info.get("goal_scored") else 0.0)
         return True
 
 
+# -------- #
 # PLOTTING #
+# -------- #
 
 def _plot_curves(
         rewards: list[float],
@@ -401,7 +404,7 @@ def _plot_curves(
     out_path = os.path.join(_PLOT_DIR, f"{run_tag}_curves.png")
     plt.savefig(out_path, dpi=150)
     plt.close()
-    print(f"[{run_tag}] Plot saved → {out_path}")
+    print(f"[{run_tag}] Plot saved -> {out_path}")
 
     return
 
