@@ -377,7 +377,7 @@ def _compute_reward_s3(
     return float(reward)
 
 
-def _compute_reward(
+def _compute_reward_og(
     self,
     dist_ball : float,
     ball_pos  : tuple,

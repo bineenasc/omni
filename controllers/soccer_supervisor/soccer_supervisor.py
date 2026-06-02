@@ -424,6 +424,17 @@ class SoccerEnv(Supervisor, gym.Env):
         robot_pos = _flat(self._robot_node)
         dist_ball = float(obs[1]) * FIELD_DIAG
 
+        # ── Robot displacement since last step ─────────────────────────────
+        moved = math.hypot(
+            robot_pos[0] - self._prev_robot_pos[0],
+            robot_pos[1] - self._prev_robot_pos[1],
+        )
+        # ── Goal-post stuck detection ──────────────────────────────────────
+        if self._is_near_post(robot_pos) and moved < 0.003:
+            self._post_stuck_steps += 1
+        else:
+            self._post_stuck_steps = max(0, self._post_stuck_steps - 2)
+
         # Events & terminal flags 
         events = self._check_events(ball_pos)
         terminated = events["goal_scored"] or events["own_goal"] or events["ball_out"]
@@ -433,7 +444,7 @@ class SoccerEnv(Supervisor, gym.Env):
         '''reward = self._compute_reward(
             dist_ball, ball_pos, robot_pos, events
         )'''
-        reward = self._dispatch_reward(dist_ball, ball_pos, robot_pos, events) #defined in train.py
+        reward = self._dispatch_reward(dist_ball, ball_pos, robot_pos, moved, events) #defined in train.py
 
         # --- Update prev state for next step --- #
         self._prev_dist_ball = dist_ball
@@ -547,7 +558,7 @@ class SoccerEnv(Supervisor, gym.Env):
     # Reward
     # ══════════════════════════════════════════════════════════════════════════
     
-    def _compute_reward_2(
+    def _compute_reward(
         self,
         dist_ball: float,
         ball_pos: tuple,
@@ -755,13 +766,14 @@ class SoccerEnv(Supervisor, gym.Env):
         dist_ball: float,
         ball_pos: tuple,
         robot_pos: tuple,
+        moved: float,
         events: dict,
     ) -> float:
         """
         Call reward function that is currently active
         """
         fn = getattr(self, getattr(self, "_active_reward_fn", "_compute_reward"))
-        return fn(dist_ball, ball_pos, robot_pos, events)
+        return fn(dist_ball, ball_pos, robot_pos, moved, events)
 
 
     # ══════════════════════════════════════════════════════════════════════════
