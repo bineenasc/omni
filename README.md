@@ -43,19 +43,25 @@ Ambos possuem LiDAR de 1440 raios, GPS, IMU e 3 rodas omnidirecionais dispostas 
 | Epochs            | 20 (alternando Viper/Titan)                |
 | Duração máx.      | 1500 passos por episódio (60 s simulados)  |
 
-### Observação (19 dimensões, frame local do robô)
+### Observação (23 dimensões, frame local do robô)
 
 ```
-[0]      type_id              — 0 = Viper, 1 = Titan
-[1]      dist_ball_norm       — distância normalizada até a bola
-[2–3]    dir_ball (x, z)      — direção LOCAL à bola
-[4]      dist_goal_norm       — distância normalizada até o gol de ataque
-[5–6]    dir_goal (x, z)      — direção LOCAL ao gol
-[7–9]    poste direito ataque — dist, dir_x, dir_z (LOCAL)
+[0]      type_id               — 0 = Viper, 1 = Titan
+[1]      dist_ball_norm        — distância normalizada até a bola
+[2–3]    dir_ball (x, z)       — direção LOCAL à bola
+[4]      dist_goal_norm        — distância normalizada até o gol de ataque
+[5–6]    dir_goal (x, z)       — direção LOCAL ao gol
+[7–9]    poste direito ataque  — dist, dir_x, dir_z (LOCAL)
 [10–12]  poste esquerdo ataque
 [13–15]  poste direito próprio
 [16–18]  poste esquerdo próprio
+──── Adversário (1v0: dummy; 1v1: valores reais) ────
+[19]     dist_opp_norm         — distância normalizada robô→adversário   (1v0 = 1.0)
+[20–21]  dir_opp (x, z)        — direção LOCAL ao adversário             (1v0 = 0.0)
+[22]     dist_opp_ball_norm    — distância normalizada adversário→bola   (1v0 = 1.0)
 ```
+
+> As dimensões [19–22] são preenchidas com valores dummy durante o treino 1v0 (`[1.0, 0.0, 0.0, 1.0]`), o que permite carregar diretamente o checkpoint 1v0 no treino 1v1 sem recriar a rede — apenas os pesos das novas entradas precisam de ajuste fino.
 
 > Todas as direções são rotacionadas para o frame local do robô usando `atan2(-m[1], m[0])` a partir da matriz de orientação do Webots. Isso permite que o mapeamento observação → ação seja direto: `dir_bz > 0` significa "bola à frente" → `vz > 0`.
 
@@ -85,12 +91,14 @@ O **fator de proximidade** escala o reward de avanço da bola pela distância ro
 
 O treino usa um curriculum progressivo baseado no contador global de passos:
 
-| Fase | Passos        | Epochs (60k/epoch)         | Spawn da bola                     | Spawn do robô          |
-|------|---------------|----------------------------|-----------------------------------|------------------------|
-| 1a   | 0 – 120k      | 0–1 (1× Viper + 1× Titan)  | 5–20 cm do gol, dentro das traves | 15–40 cm atrás da bola |
-| 1b   | 120k – 240k   | 2–3 (1× Viper + 1× Titan)  | 50 cm – 1.5 m do gol              | Atrás da bola          |
-| 2    | 240k – 360k   | 4–5 (1× Viper + 1× Titan)  | Campo de ataque (z > 0)           | Qualquer posição       |
-| 3    | 360k+         | 6–25 (10× Viper + 10× Titan)| Completamente aleatório           | Completamente aleatório|
+| Fase | Passos          | Epochs (60k/epoch)           | Spawn da bola              | Spawn do robô          |
+|------|-----------------|------------------------------|----------------------------|------------------------|
+| 1a   | 0 – 240k        | 0–3  (2× Viper + 2× Titan)   | 5–20 cm do gol             | 15–40 cm atrás da bola |
+| 1b   | 240k – 480k     | 4–7  (2× Viper + 2× Titan)   | 0.5–1.5 m do gol           | Atrás da bola          |
+| 1c   | 480k – 720k     | 8–11 (2× Viper + 2× Titan)   | 1.5–3 m do gol             | Atrás da bola          |
+| 1d   | 720k – 960k     | 12–15 (2× Viper + 2× Titan)  | 3–4.5 m do gol             | Atrás da bola          |
+| 2    | 960k – 1200k    | 16–19 (2× Viper + 2× Titan)  | Campo de ataque (z > 0)    | Qualquer posição       |
+| 3    | 1200k+          | 20–35 (8× Viper + 8× Titan)  | Completamente aleatório    | Completamente aleatório|
 
 A fase 1a é crucial: com a bola a poucos centímetros do gol, qualquer toque marca ponto. Isso garante que o PPO veja o sinal de +50 nas primeiras horas de treino e não fique preso em ótimos locais.
 

@@ -19,13 +19,15 @@ read sensor values that belong to another controller process.
 
 Observation space (gymnasium.spaces.Box)
 ────────────────────────────────────────
-  Box(19,)  [type_id,
+  Box(23,)  [type_id,
               dist_ball_n, dir_bx, dir_bz,     ← LOCAL frame
               dist_goal_n, dir_gx, dir_gz,     ← LOCAL frame
               dist_ar_n, dir_ar_x, dir_ar_z,   ← attack right post  (LOCAL)
               dist_al_n, dir_al_x, dir_al_z,   ← attack left post   (LOCAL)
               dist_or_n, dir_or_x, dir_or_z,   ← own right post     (LOCAL)
-              dist_ol_n, dir_ol_x, dir_ol_z]   ← own left post      (LOCAL)
+              dist_ol_n, dir_ol_x, dir_ol_z,   ← own left post      (LOCAL)
+              dist_opp_n, dir_op_x, dir_op_z,  ← opponent (1v0: dummy 1,0,0)
+              dist_opp_ball_n]                 ← opponent→ball dist (1v0: dummy 1)
 
   Todas as direções são rotacionadas para o frame LOCAL do robô antes de
   entrar no obs. Assim dir_bz > 0 significa "bola à frente" e a rede
@@ -134,7 +136,7 @@ class SoccerEnv(Supervisor, gym.Env):
 
         self._timestep      = int(self.getBasicTimeStep())   # 8 ms
         self._steps_per_act = SIM["steps_per_action"]        # 5  → 40 ms/step
-        self._max_steps     = 1000  # 40 s / 0.04 s per step
+        self._max_steps     = 1250  # 50 s / 0.04 s per step
 
         # ── Webots node handles ────────────────────────────────────────────
         self._ball_node  = self.getFromDef("BOLA")
@@ -146,24 +148,31 @@ class SoccerEnv(Supervisor, gym.Env):
         self._receiver.enable(self._timestep)
 
         # ── Gymnasium spaces ───────────────────────────────────────────────
-        # "vector" bounds are per-component (19 dimensions, LOCAL frame):
-        #   [0]       type_id             ∈ {0, 1}    → [0, 1]
-        #   [1]       dist_ball_norm      ∈ [0, 1]
-        #   [2–3]     dir_ball (local)    ∈ [-1, 1] each
-        #   [4]       dist_goal_norm      ∈ [0, 1]
-        #   [5–6]     dir_goal (local)    ∈ [-1, 1] each
-        #   [7–9]     attack-right post   dist_norm, dir_x, dir_z  (local)
-        #   [10–12]   attack-left  post   dist_norm, dir_x, dir_z  (local)
-        #   [13–15]   own-right    post   dist_norm, dir_x, dir_z  (local)
-        #   [16–18]   own-left     post   dist_norm, dir_x, dir_z  (local)
-        # Pattern per post: [0,1], [-1,1], [-1,1]
+        # Observation vector — 23 dimensions, LOCAL robot frame:
+        #   [0]       type_id               ∈ {0, 1}   → [0, 1]
+        #   [1]       dist_ball_norm         ∈ [0, 1]
+        #   [2–3]     dir_ball  (local x,z)  ∈ [-1, 1]
+        #   [4]       dist_goal_norm         ∈ [0, 1]
+        #   [5–6]     dir_goal  (local x,z)  ∈ [-1, 1]
+        #   [7–9]     attack-right post      dist_norm, dir_x, dir_z (local)
+        #   [10–12]   attack-left  post      dist_norm, dir_x, dir_z (local)
+        #   [13–15]   own-right    post      dist_norm, dir_x, dir_z (local)
+        #   [16–18]   own-left     post      dist_norm, dir_x, dir_z (local)
+        #   ── Opponent features (1v0: fixed dummy values; 1v1: real data) ──
+        #   [19]      dist_opp_norm          ∈ [0, 1]   (1v0 → 1.0)
+        #   [20–21]   dir_opp (local x,z)    ∈ [-1, 1]  (1v0 → 0.0, 0.0)
+        #   [22]      dist_opp_ball_norm     ∈ [0, 1]   (1v0 → 1.0)
         _post_low  = [0., -1., -1.] * 4   # 12 values for 4 posts
         _post_high = [1.,  1.,  1.] * 4
+        _opp_low   = [0., -1., -1., 0.]   # opponent features lower bounds
+        _opp_high  = [1.,  1.,  1., 1.]   # opponent features upper bounds
         _obs_low  = np.array(
-            [0., 0., -1., -1., 0., -1., -1.] + _post_low,  dtype=np.float32
+            [0., 0., -1., -1., 0., -1., -1.] + _post_low + _opp_low,
+            dtype=np.float32,
         )
         _obs_high = np.array(
-            [1., 1.,  1.,  1., 1.,  1.,  1.] + _post_high, dtype=np.float32
+            [1., 1.,  1.,  1., 1.,  1.,  1.] + _post_high + _opp_high,
+            dtype=np.float32,
         )
         self.observation_space = spaces.Box(
             low=_obs_low, high=_obs_high, dtype=np.float32
@@ -186,9 +195,12 @@ class SoccerEnv(Supervisor, gym.Env):
 
         # ── Curriculum de posições ─────────────────────────────────────────
         # Contador global de passos — incrementado em step(), nunca resetado.
-        # Fase 1 (0–100k)  : bola perto do gol, robô atrás da bola
-        # Fase 2 (100k–300k): bola no campo de ataque, robô aleatório
-        # Fase 3 (300k+)   : completamente aleatório
+        # Fase 1a (0–240k)    : bola 5–20 cm do gol, robô atrás da bola
+        # Fase 1b (240k–480k) : bola 0.5–1.5 m do gol, robô atrás da bola
+        # Fase 1c (480k–720k) : bola 1.5–3 m do gol, robô atrás da bola
+        # Fase 1d (720k–960k) : bola 3–4.5 m do gol, robô atrás da bola
+        # Fase 2  (960k–1200k): bola no campo de ataque (z>0), robô aleatório
+        # Fase 3  (1200k+)    : completamente aleatório
         self._curriculum_step : int = 0
 
         # ── Bônus de meio campo (uma vez por episódio) ─────────────────────
@@ -223,21 +235,19 @@ class SoccerEnv(Supervisor, gym.Env):
         self._pos_history.clear()
 
         # ── Curriculum de posições ─────────────────────────────────────────
-        # Fase 1a (0–30k)   : bola a 5–20 cm do gol, dentro das traves → gol quase garantido
-        # Fase 1b (30k–100k): bola a 0.5–1.5 m do gol, robô logo atrás
-        # Fase 2 (100k–300k): bola no campo de ataque (z>0), robô aleatório
-        # Fase 3 (300k+)    : completamente aleatório
         cs = self._curriculum_step
         _gz  = FIELD["goal_z_attack"]    # 4.55
         _ghw = FIELD["goal_half_width"]  # 0.75
 
-        # Phase boundaries align with the epoch schedule (60k steps/epoch, 26 epochs):
-        #   Phase 1a: epochs 0–1   (1× Viper + 1× Titan)  →   0 – 120k steps
-        #   Phase 1b: epochs 2–3   (1× Viper + 1× Titan)  → 120k – 240k steps
-        #   Phase 2:  epochs 4–5   (1× Viper + 1× Titan)  → 240k – 360k steps
-        #   Phase 3:  epochs 6–25  (10× Viper + 10× Titan) →  360k+ steps
+        # Phase boundaries (60k steps/epoch, 36 epochs total):
+        #   Phase 1a: epochs  0– 3  (2V+2T) →    0 –  240k  ball 5–20 cm from goal
+        #   Phase 1b: epochs  4– 7  (2V+2T) →  240k –  480k  ball 0.5–1.5 m from goal
+        #   Phase 1c: epochs  8–11  (2V+2T) →  480k –  720k  ball 1.5–3 m from goal
+        #   Phase 1d: epochs 12–15  (2V+2T) →  720k –  960k  ball 3–4.5 m from goal
+        #   Phase 2:  epochs 16–19  (2V+2T) →  960k – 1200k  full attack half
+        #   Phase 3:  epochs 20–35  (8V+8T) → 1200k+          fully random
 
-        if cs < 120_000:
+        if cs < 240_000:
             # Phase 1a — trivial: ball almost inside the goal.
             # Any touch in +Z scores → PPO finds the +300 signal quickly.
             bz = self._rng.uniform(_gz - 0.20, _gz - 0.05)    # 4.35 → 4.50
@@ -245,7 +255,7 @@ class SoccerEnv(Supervisor, gym.Env):
             rz = float(bz) - self._rng.uniform(0.15, 0.40)
             rx = float(bx) + self._rng.uniform(-0.15, 0.15)
 
-        elif cs < 240_000:
+        elif cs < 480_000:
             # Phase 1b — easy: ball 0.5–1.5 m from goal, robot just behind ball
             bz = self._rng.uniform(_gz - 1.50, _gz - 0.50)    # 3.05 → 4.05
             bx = self._rng.uniform(-_ghw, _ghw)
@@ -254,8 +264,29 @@ class SoccerEnv(Supervisor, gym.Env):
             rz = self._rng.uniform(rz_min, rz_max)
             rx = float(bx) + self._rng.uniform(-0.30, 0.30)
 
-        elif cs < 360_000:
-            # Phase 2 — medium: ball in the attack half (z > 0), robot anywhere
+        elif cs < 720_000:
+            # Phase 1c — medium-easy: ball 1.5–3 m from goal, robot behind ball
+            bz = self._rng.uniform(_gz - 3.00, _gz - 1.50)    # 1.55 → 3.05
+            bx = self._rng.uniform(-FIELD["half_width"] * 0.70,
+                                    FIELD["half_width"] * 0.70)
+            rz_max = float(bz) - 0.20
+            rz_min = max(float(bz) - 1.50, -1.00)
+            rz = self._rng.uniform(rz_min, rz_max)
+            rx = float(bx) + self._rng.uniform(-0.40, 0.40)
+
+        elif cs < 960_000:
+            # Phase 1d — medium: ball 3–4.5 m from goal, robot behind ball
+            bz = self._rng.uniform(_gz - 4.50, _gz - 3.00)    # 0.05 → 1.55
+            bx = self._rng.uniform(-FIELD["half_width"] * 0.70,
+                                    FIELD["half_width"] * 0.70)
+            rz_max = float(bz) - 0.20
+            rz_min = max(float(bz) - 2.00, -FIELD["half_length"] * 0.60)
+            rz = self._rng.uniform(rz_min, rz_max)
+            rx = self._rng.uniform(-FIELD["half_width"] * 0.70,
+                                    FIELD["half_width"] * 0.70)
+
+        elif cs < 1_200_000:
+            # Phase 2 — hard: ball anywhere in attack half (z > 0), robot anywhere
             bz = self._rng.uniform(0.0, FIELD["half_length"] * 0.80)
             bx = self._rng.uniform(-FIELD["half_width"] * 0.60,
                                     FIELD["half_width"] * 0.60)
@@ -433,16 +464,24 @@ class SoccerEnv(Supervisor, gym.Env):
             uv_l = to_local(uv_w[0], uv_w[1])
             post_feats += [d / FIELD_DIAG, uv_l[0], uv_l[1]]
 
+        # ── Opponent features — 1v0: dummy values; replace with real data in 1v1 ──
+        # [19] dist_opp_norm      = 1.0  ("opponent at max distance / absent")
+        # [20] dir_opp_x (local)  = 0.0
+        # [21] dir_opp_z (local)  = 0.0
+        # [22] dist_opp_ball_norm = 1.0  ("opponent far from ball")
+        opp_feats: list[float] = [1.0, 0.0, 0.0, 1.0]
+
         obs = np.array(
             [
-                float(cfg["type_id"]),       # [0]  0=viper / 1=titan
-                dist_ball / FIELD_DIAG,      # [1]  dist normalizada robô→bola
-                dir_ball[0],                 # [2]  dir_x LOCAL
-                dir_ball[1],                 # [3]  dir_z LOCAL  (>0 = bola à frente)
-                dist_goal / FIELD_DIAG,      # [4]  dist normalizada robô→gol
-                dir_goal[0],                 # [5]  dir_x LOCAL
-                dir_goal[1],                 # [6]  dir_z LOCAL  (>0 = gol à frente)
-            ] + post_feats,                  # [7-18] 4 postes × (dist, dir_x, dir_z) LOCAL
+                float(cfg["type_id"]),       # [0]   0=viper / 1=titan
+                dist_ball / FIELD_DIAG,      # [1]   dist normalised robot→ball
+                dir_ball[0],                 # [2]   dir_x LOCAL
+                dir_ball[1],                 # [3]   dir_z LOCAL  (>0 = ball ahead)
+                dist_goal / FIELD_DIAG,      # [4]   dist normalised robot→goal
+                dir_goal[0],                 # [5]   dir_x LOCAL
+                dir_goal[1],                 # [6]   dir_z LOCAL  (>0 = goal ahead)
+            ] + post_feats                   # [7–18] 4 posts × (dist, dir_x, dir_z) LOCAL
+              + opp_feats,                   # [19–22] opponent (dummy zeros in 1v0)
             dtype=np.float32,
         )
         return obs
