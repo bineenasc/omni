@@ -54,12 +54,15 @@ def ler_logs():
     return dados
 
 
-def status(reward):
-    if reward is None:   return "⚪ Sem dados ainda"
-    if reward > 30:      return "🏆 Marcando gols!"
-    if reward > 10:      return "✅ Aprendendo bem!"
-    if reward > 3:       return "🟡 Começando a aprender..."
-    return "🔴 Ainda aleatório — normal no início"
+def status(ep_len):
+    """Usa duração do episódio como indicador real de gols.
+    _max_steps=1000 → duração colada em 1000 = sem gols.
+    Duração a cair = episódios a terminar por gol."""
+    if ep_len is None:    return "⚪ Sem dados ainda"
+    if ep_len < 400:      return "🏆 Marcando gols frequentemente!"
+    if ep_len < 700:      return "⚽ Marcando alguns gols"
+    if ep_len < 950:      return "🟡 Gols raros — ainda a aprender"
+    return "🔴 Sem gols — episódios a truncar por tempo"
 
 
 plt.style.use("dark_background")
@@ -85,6 +88,7 @@ def desenhar(dados):
             spine.set_color("#333")
 
     last_reward = None
+    last_ep_len = None
     total_steps = 0
 
     if "ep_rew_mean" in dados and dados["ep_rew_mean"]:
@@ -108,19 +112,23 @@ def desenhar(dados):
         vals  = [p[1] for p in pts]
         ax2.plot(steps, vals, color=COR, linewidth=2.2)
         ax2.fill_between(steps, vals, alpha=0.15, color=COR)
+        last_ep_len = vals[-1]
+        ax2.annotate(f" {last_ep_len:.0f} steps", xy=(steps[-1], last_ep_len),
+                     color=COR, fontsize=10, va="center", fontweight="bold")
 
-    ax1.set_ylabel("Recompensa por episódio\n(quanto MAIOR melhor 🎯)", color="#ccc", fontsize=10)
+    ax1.set_ylabel("Recompensa por episódio\n(shaping acumulado — NÃO indica gols)", color="#ccc", fontsize=10)
     ax1.axhline(0, color="#444", linewidth=0.8, linestyle="--")
     ax1.grid(axis="y", alpha=0.15, color="white")
 
-    ax2.set_ylabel("Duração dos episódios\n(cai quando marca gol ⚽)", color="#ccc", fontsize=10)
+    ax2.set_ylabel("Duração dos episódios ⚽\n(CAIR = marcando gols reais)", color="#ccc", fontsize=10)
     ax2.set_xlabel("Passos de treino →", color="#ccc", fontsize=10)
-    ax2.axhline(1000, color="#444", linewidth=0.8, linestyle="--")
-    ax2.annotate("← sem gol ainda", xy=(0, 1000), color="#555",
-                 fontsize=8, xytext=(5, 5), textcoords="offset points")
+    ax2.axhline(1000, color="#F44336", linewidth=1.2, linestyle="--", alpha=0.7)
+    ax2.annotate("← max_steps (sem gol)", xy=(0, 1000), color="#F44336",
+                 fontsize=8, xytext=(5, -12), textcoords="offset points")
+    ax2.set_ylim(0, 1100)
     ax2.grid(axis="y", alpha=0.15, color="white")
 
-    st = f"Viper | {total_steps:,} passos | {status(last_reward)}"
+    st = f"Viper | {total_steps:,} passos | {status(last_ep_len)}"
     status_box.set_text(st)
 
     plt.tight_layout(rect=[0, 0.055, 1, 0.96])

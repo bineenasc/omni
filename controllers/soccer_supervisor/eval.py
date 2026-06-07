@@ -32,7 +32,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from soccer_supervisor import SoccerEnv
-from shared_configs import BALL, FIELD, IPC, ROBOT_CONFIGS, SIM, get_robot_config
+from shared_configs import FIELD
 
 
 #  Allow running as both a Webots controller and a plain Python script 
@@ -57,25 +57,8 @@ def _find_vecnorm(model_path: str) -> str | None:
     return .../checkpoints/epoch_05_viper_vecnorm.pkl  if it exists.
     """
     stem = os.path.splitext(model_path)[0]
-    pkl = stem + "_vecnorm.pkl"
+    pkl  = stem + "_vecnorm.pkl"
     return pkl if os.path.isfile(pkl) else None
-
-
-def _build_vec_env(env_raw: SoccerEnv, model_path: str) -> VecNormalize:
-    """
-    Wrap env_raw in Monitor -> DummyVecEnv -> VecNormalize.
-    """
-    vec = DummyVecEnv([lambda: Monitor(env_raw)])
-    pkl = _find_vecnorm(model_path)
-    if pkl:
-        print(f"VecNorm : {pkl}")
-        vec = VecNormalize.load(pkl, vec)
-        vec.training = False
-        vec.norm_reward = False
-    else:
-        print("VecNorm : not found - raw rewards")
-        vec = VecNormalize(vec, norm_obs=False, norm_reward=False, gamma=0.99)
-    return vec
 
 
 # --- EVAL --- #
@@ -98,9 +81,11 @@ def model_evaluate(
  
     #model = PPO.load(model_path, env=env)    # still deciding wher to load model
 
-    env_raw = SoccerEnv()
-    env_mon = Monitor(env_raw)
-    vec_env = DummyVecEnv([lambda: env_mon])
+    env_raw  = SoccerEnv()
+    # Run at real-time speed so the 3D view is smooth (not a flickering fast-sim).
+    env_raw.simulationSetMode(env_raw.SIMULATION_MODE_REAL_TIME)
+    env_mon  = Monitor(env_raw)
+    vec_env  = DummyVecEnv([lambda: env_mon])
 
     vecnorm_path = _find_vecnorm(model_path)
     if vecnorm_path:
@@ -109,7 +94,7 @@ def model_evaluate(
         vec_env.training = False   # freeze running stats during eval
         vec_env.norm_reward = False   # return raw rewards for reporting
     else:
-        print(" VecNorm: not found - rewards will be raw (unnormalised)")
+        print(" VecNorm: not found — rewards will be raw (unnormalised)")
         vec_env = VecNormalize(
             vec_env,
             norm_obs = False,
@@ -118,7 +103,6 @@ def model_evaluate(
         )
 
     model = PPO.load(model_path, env=vec_env)
-
     # ----------§---------- #
 
     results = []
@@ -126,7 +110,7 @@ def model_evaluate(
     for ep in range(n_episodes):
         #model = PPO.load(model_path, env=vec_env) # load model inside loop to reset any VecNormalize stats if used during training
 
-        obs = vec_env.reset() # if model load inside, comment this line
+        obs, _  = vec_env.reset() # if model load inside, comment this line
         ep_reward = 0.0
         ep_steps = 0
         done = False
@@ -286,119 +270,6 @@ def model_compare(
     plt.tight_layout()
 
     plt.show()
-
-
-
-
-
-# --- SIMULATIONS --- #
-def play_simulation(
-    model_path: str,
-    time: float, # seconds
-    deterministic: bool = True,
-    env_raw: SoccerEnv | None = None,
-) -> None:
-    """ 
-    Description
-        Run a single continuous simulation for 'time' seconds using a trained model
-        Webots must be open with the world loaded
-        Runs at real time speed in the 3D window
-    """
-
-
-    GOAL_Z = FIELD["goal_z_attack"]
-    owns_env = env_raw is None
-    if owns_env:
-        env_raw = SoccerEnv()
-
-    # robot node - if none force it
-    if env_raw.getFromDef("VIPER") is None:
-        print("[play_simulation] VIPER node not found — inserting default robot...")
-        env_raw.getRoot().getField("children").importMFNodeFromString(
-            -1,
-            'DEF VIPER Viper {\n'
-            '  translation 0 0.055 -1\n'
-            '  rotation 1 0 0 -1.5707953071795862\n'
-            '  name "viper"\n'
-            '  controller "robot_controller"\n'
-            '}'
-        )
-        env_raw._robot_node  = env_raw.getFromDef("VIPER")
-        env_raw._active_robot = "viper"
-        env_raw.set_reward_fn("_compute_reward_s3")
-
-        # let the controller initialise
-        for _ in range(10):
-            env_raw._send_action(0.0, 0.0, 0.0)
-            env_raw._sim_step()
-
-    env_raw._robot_node = env_raw.getFromDef("VIPER")
-
-    if env_raw._robot_node is None:
-        raise RuntimeError(
-            "VIPER node still not found after insertion attempt.\n"
-            "Check that the Viper PROTO is declared as EXTERNPROTO in soccer.wbt."
-        )
-    
-
-    # chose Curriculum step
-    env_raw._curriculum_phase = 2
-
-    # Switch to real-time so it's watchable
-    env_raw.simulationSetMode(env_raw.SIMULATION_MODE_REAL_TIME)
-
-    vec_env = _build_vec_env(env_raw, model_path)
-    model = PPO.load(model_path, env=vec_env)
-
-    # Convert time to max steps 
-    # steps_per_act=5, timestep=8ms 
-    # 40ms per RL step -> 25 steps/second
-    steps_per_second = 1.0 / (SIM["steps_per_action"] * env_raw._timestep / 1000.0)
-    max_steps = int(time * steps_per_second)
-
-    print(f"\n --- Model: {model_path} --- \n")
-    print(f" --- Duration: {time}s  ({max_steps} steps) --- ")
-
-    obs = vec_env.reset()
-    ep = 1
-    step = 0
-    ep_reward = 0.0
-
-    while step < max_steps:
-        action, _ = model.predict(obs, deterministic=deterministic)
-        obs, reward, dones, infos = vec_env.step(action)
-        ep_reward += float(reward[0])
-        step += 1
-        info = infos[0]
-
-        if bool(dones[0]):
-            outcome = (
-                "GOAL" if info.get("goal_scored") else
-                "OWN GOAL" if info.get("own_goal") else
-                "OUT" if info.get("ball_out") else
-                "TRUNC"
-            )
-            print(f"Episode {ep:>3}  {outcome}  R={ep_reward:+.2f}  "
-                  f"steps_used={info.get('step', '?')}")
-            ep += 1
-            ep_reward = 0.0
-            obs = vec_env.reset()
-
-    vec_env.close()
-
-    # Restore fast mode so training works normally if you switch back
-    env_raw.simulationSetMode(env_raw.SIMULATION_MODE_FAST)
-
-    if owns_env:
-        env_raw.close()
-
-    print(f"\nSSimulation done: {ep-1} episodes in {time}s")
-
-    return None
-
-
-
-
 
 
 

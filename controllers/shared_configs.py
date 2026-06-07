@@ -10,11 +10,11 @@ All physical constants must match the values declared in the corresponding
 
 import os
 import sys
-import struct as _struct
 
-# --- SIMULATION TYPE --- #
-MODE = "eval" # "train" or "eval" -> either run train.py or eval.py 
-
+# ── Simulation mode ───────────────────────────────────────────────────────────
+# "train" → executa train.py (treino PPO)
+# "eval"  → executa model_evaluate() com o modelo treinado
+MODE = "train"
 
 # ── Robot configurations ──────────────────────────────────────────────────────
 # Keys must match the Webots robot name (robot.getName() in a controller, or
@@ -82,13 +82,13 @@ SIM = {
 # Both sides must use the same format strings.  Defined once here to prevent
 # desync bugs between robot_controller.py and soccer_supervisor.py.
 
+import struct as _struct
 
-# Inter-Process Communication
-IPC = { 
+IPC = {
     "action_channel":  0,
     "sensor_channel":  1,
     "action_fmt":      "3f",
-    "action_bytes":    _struct.calcsize("3f"), # 12 bytes
+    "action_bytes":    _struct.calcsize("3f"),         # 12 bytes
     "n_lidar":         1440,
     "sensor_fmt":      f"i{1440}f",
     "sensor_bytes":    _struct.calcsize(f"i{1440}f"), # 5764 bytes
