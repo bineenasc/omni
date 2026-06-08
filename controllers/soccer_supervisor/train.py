@@ -44,8 +44,9 @@ TRAINING_COMBINATIONS: list[tuple[str, str]] = [
     #("ppo", "_compute_reward_s1"),
     #("ppo", "_compute_reward_s2"),
     #("ppo", "_compute_reward_s3"),
+    ("ppo", "_compute_reward_s4"),
     #("ppo", "_compute_reward_og"),
-    ("ppo", "_compute_reward"),
+    #("ppo", "_compute_reward"),
 ]
 
 

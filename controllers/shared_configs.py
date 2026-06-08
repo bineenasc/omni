@@ -60,17 +60,17 @@ FIELD = {
 
 # ── Ball ──────────────────────────────────────────────────────────────────────
 BALL = {
-    "radius": 0.025,   # m — matches BOLA Sphere radius in soccer.wbt
+    "radius": 0.025,   # m    matches BOLA Sphere radius in soccer.wbt
     "mass":   0.055,   # kg
-}
+} # find a way to read directly form soccer.wbt
 
 # ── Simulation timing ─────────────────────────────────────────────────────────
 SIM = {
     "basic_time_step": 8,       # ms — must match WorldInfo.basicTimeStep in soccer.wbt
     "steps_per_action": 5,      # physics steps executed per RL action (= 40 ms / action)
-    "max_episode_steps": 1000,  # episode timeout (1000 × 40 ms = 40 s)
+    "max_episode_steps": 2100,  # episode timeout (2100 × 40 ms = 84 s)
     # ↑ Reduced from 2000: at MAX_LINEAR=0.5 m/s the robot can cross the full
-    # 10.4 m field in ≈520 steps.  1000 steps gives a generous margin while
+    # 10.4 m field in ≈520 steps. 2100 steps gives a generous margin while
     # doubling the number of resets per epoch (≥30 episodes vs ≤15).
 }
 

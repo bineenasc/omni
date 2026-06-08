@@ -15,6 +15,14 @@ WorldInfo {
       ]
       softCFM 0.0001
     }
+    ContactProperties { # force ball to bounce
+      material1 "ball"
+      coulombFriction [
+        0.15
+      ]
+      bounce 0.2       # 0=no bounce, 1=perfectly elastic
+      softCFM 0.0001
+    }
   ]
 }
 Viewpoint {
@@ -293,8 +301,8 @@ DEF BOLA Solid {
       0 0 0
     ]
     damping Damping {
-      linear 0.17
-      angular 0.33
+      linear 0.09
+      angular 0.15
     }
   }
 }

@@ -293,10 +293,12 @@ def model_compare(
 
 # --- SIMULATIONS --- #
 def play_simulation(
-    model_path: str,
-    time: float, # seconds
+    model_path: str = "checkpoints/ppo/final_model.zip",
+    reward_fn: str = "_compute_reward",
+    time: float = 112, # seconds
     deterministic: bool = True,
     env_raw: SoccerEnv | None = None,
+    curr_stage: int = 3,
 ) -> None:
     """ 
     Description
@@ -305,6 +307,7 @@ def play_simulation(
         Runs at real time speed in the 3D window
     """
 
+    
 
     GOAL_Z = FIELD["goal_z_attack"]
     owns_env = env_raw is None
@@ -313,7 +316,7 @@ def play_simulation(
 
     # robot node - if none force it
     if env_raw.getFromDef("VIPER") is None:
-        print("[play_simulation] VIPER node not found — inserting default robot...")
+        print("VIPER node not found - inserting default robot...")
         env_raw.getRoot().getField("children").importMFNodeFromString(
             -1,
             'DEF VIPER Viper {\n'
@@ -325,7 +328,7 @@ def play_simulation(
         )
         env_raw._robot_node  = env_raw.getFromDef("VIPER")
         env_raw._active_robot = "viper"
-        env_raw.set_reward_fn("_compute_reward_s3")
+        env_raw.set_reward_fn(reward_fn)
 
         # let the controller initialise
         for _ in range(10):
@@ -342,7 +345,9 @@ def play_simulation(
     
 
     # chose Curriculum step
-    env_raw._curriculum_phase = 2
+    env_raw._curriculum_phase = curr_stage
+    env_raw._curriculum_step = env_raw._step_from_phase(curr_stage)
+    env_raw._lock_curriculum_phase = True
 
     # Switch to real-time so it's watchable
     env_raw.simulationSetMode(env_raw.SIMULATION_MODE_REAL_TIME)
@@ -356,8 +361,8 @@ def play_simulation(
     steps_per_second = 1.0 / (SIM["steps_per_action"] * env_raw._timestep / 1000.0)
     max_steps = int(time * steps_per_second)
 
-    print(f"\n --- Model: {model_path} --- \n")
-    print(f" --- Duration: {time}s  ({max_steps} steps) --- ")
+    print(f"\n --- Model: {model_path}  \n")
+    print(f" --- Duration: {time}s  ({max_steps} steps) ")
 
     obs = vec_env.reset()
     ep = 1

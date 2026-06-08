@@ -56,7 +56,7 @@ cfg      = get_robot_config(robot.getName())
 R        = cfg["wheel_radius"]
 L        = cfg["wheel_distance"]
 MAX_W    = cfg["max_velocity"]
-N_LIDAR  = IPC["n_lidar"]          # 360
+N_LIDAR  = IPC["n_lidar"] # 1440 # to confirm check ICP "n_lidar" in shared_configs.py
 robot_id = cfg["type_id"]          # 0 = viper, 1 = titan
 
 _SENSOR_FMT   = IPC["sensor_fmt"]    # "i360f"
