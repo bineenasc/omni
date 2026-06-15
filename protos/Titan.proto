@@ -1,0 +1,524 @@
+#VRML_SIM R2025a utf8
+
+# Titan — three-omniwheel robot.
+#
+# Internal coordinate convention: Z-up (same as Viper.proto).
+# Place in the world with:  rotation 1 0 0 -1.5707953071795862
+#
+# Wheel geometry: R=0.035 m, L=0.170 m (larger/wider than Viper's 0.030/0.138).
+# Same device names (wheel1/2/3, lidar, IMU, GPS) so the same robot_controller
+# runs on both.  shared_configs stores the per-robot R and L values used by the
+# IK.  type_id: viper=0, titan=1.
+
+PROTO Titan [
+  field SFVec3f    translation     0.35 0 0.055
+  field SFRotation rotation        0 0 1 0
+  field SFString   name            "titan"
+  field SFString   controller      "robot_controller"
+  field SFInt32    action_channel  0
+  field SFInt32    sensor_channel  1
+]
+{
+  Robot {
+    translation IS translation
+    rotation    IS rotation
+    name        IS name
+    controller  IS controller
+    model "Titan three omniwheel robot"
+
+    children [
+
+      GPS {
+      }
+
+      InertialUnit {
+        name "IMU"
+      }
+
+      # IPC — action_channel: receive actions from supervisor
+      #        sensor_channel: send lidar + robot_id to supervisor
+      # Defaults (0/1) preserve backward compatibility with the 1v0 world.
+      # In the 1v1 world, Titan is instantiated with action_channel 2 sensor_channel 3
+      # so its IPC does not collide with Viper (channels 0/1).
+      Receiver {
+        name "receiver"
+        channel IS action_channel
+      }
+
+      Emitter {
+        name "emitter"
+        channel IS sensor_channel
+      }
+
+      # ── Body ────────────────────────────────────────────────────────────
+      # Bigger and heavier than Viper: radius 0.165 m vs 0.120 m,
+      # height 0.075 m vs 0.060 m, mass 1.5 kg vs 0.8 kg.
+      # Wheel distance is also larger (0.170 m vs 0.138 m) and max wheel
+      # speed is lower (12 rad/s vs 20 rad/s), making Titan noticeably
+      # slower (~0.315 m/s top speed vs ~0.45 m/s for Viper).
+
+      DEF TITAN_BODY Pose {
+        translation 0 0 0.0375
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.04 0.20 0.82
+              roughness 0.45
+              metalness 0.10
+            }
+            geometry Cylinder {
+              height 0.075
+              radius 0.165
+              subdivision 64
+            }
+          }
+        ]
+      }
+
+      # Outer accent ring
+      Pose {
+        translation 0 0 0.076
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.01 0.08 0.55
+              emissiveColor 0 0.02 0.20
+              roughness 0.40
+              metalness 0.05
+            }
+            geometry Cylinder {
+              height 0.005
+              radius 0.168
+              subdivision 64
+            }
+          }
+        ]
+      }
+
+      # Dark top cap
+      Pose {
+        translation 0 0 0.086
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.05 0.05 0.07
+              roughness 0.35
+              metalness 0.25
+            }
+            geometry Cylinder {
+              height 0.014
+              radius 0.095
+              subdivision 64
+            }
+          }
+        ]
+      }
+
+      # Lidar sensor mount (thin cylinder)
+      Pose {
+        translation 0 0 0.098
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.01 0.01 0.01
+              roughness 0.60
+              metalness 0
+            }
+            geometry Cylinder {
+              height 0.008
+              radius 0.026
+              subdivision 32
+            }
+          }
+        ]
+      }
+
+      Pose {
+        translation 0 0 0.110
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.02 0.02 0.02
+              roughness 0.60
+              metalness 0
+            }
+            geometry Cylinder {
+              height 0.017
+              radius 0.014
+              subdivision 32
+            }
+          }
+        ]
+      }
+
+      # Front directional marker — pushed outward to clear the wider body
+      Pose {
+        translation 0.112 0 0.095
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 1 1 1
+              roughness 0.28
+              metalness 0
+            }
+            geometry Box {
+              size 0.040 0.024 0.008
+            }
+          }
+        ]
+      }
+
+      # Yellow tip on the front marker
+      Pose {
+        translation 0.135 0 0.099
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 1 0.90 0.02
+              emissiveColor 0.45 0.35 0
+              roughness 0.25
+              metalness 0.10
+            }
+            geometry Box {
+              size 0.006 0.028 0.005
+            }
+          }
+        ]
+      }
+
+      # ── Lidar ─────────────────────────────────────────────────────────
+      # Identical spec to Viper so the same CNN feature extractor works.
+
+      Lidar {
+        translation 0 0 0.122
+        rotation 0 0 1 0
+        name "lidar"
+        horizontalResolution 1440
+        fieldOfView 6.28318
+        numberOfLayers 1
+        near 0.02
+        minRange 0.02
+        maxRange 3.5
+        noise 0.01
+      }
+
+      # ── Wheel 1 — rear (0°) ───────────────────────────────────────────
+      # L = 0.170 m (wider stance than Viper's 0.138 m).
+      # R = 0.035 m (slightly larger wheels).
+      # Wheel centre Z = R = 0.035 so the wheel bottom is exactly at Z=0
+      # (local ground), matching the same convention as Viper (Z=0.030=R).
+      # maxVelocity = 12 rad/s, clamped to 9 rad/s in shared_configs for RL
+      # → ~0.315 m/s effective top speed vs ~0.45 m/s for Viper.
+
+      Pose {
+        rotation 0 0 1 0
+        children [
+          Pose {
+            translation -0.126 0 0.035
+            children [
+              Shape {
+                appearance PBRAppearance {
+                  baseColor 0.01 0.01 0.01
+                  roughness 0.8
+                  metalness 0
+                }
+                geometry Box {
+                  size 0.048 0.018 0.014
+                }
+              }
+            ]
+          }
+          HingeJoint {
+            jointParameters HingeJointParameters {
+              axis 1 0 0
+              anchor -0.170 0 0.035
+            }
+            device [
+              RotationalMotor {
+                name "wheel1"
+                maxVelocity 12
+                maxTorque 3.0
+              }
+            ]
+            endPoint Solid {
+              translation -0.170 0 0.035
+              rotation 0 1 0 1.5708
+              children [
+                Shape {
+                  appearance PBRAppearance {
+                    baseColor 0.02 0.02 0.02
+                    roughness 0.85
+                    metalness 0
+                  }
+                  geometry Cylinder {
+                    height 0.032
+                    radius 0.035
+                    subdivision 32
+                  }
+                }
+                Pose {
+                  translation 0 0 0.017
+                  children [
+                    Shape {
+                      appearance PBRAppearance {
+                        baseColor 0.10 0.25 0.65
+                        roughness 0.32
+                        metalness 0.45
+                      }
+                      geometry Cylinder {
+                        height 0.004
+                        radius 0.021
+                        subdivision 24
+                      }
+                    }
+                  ]
+                }
+                Pose {
+                  translation 0 0 -0.017
+                  children [
+                    Shape {
+                      appearance PBRAppearance {
+                        baseColor 0.10 0.25 0.65
+                        roughness 0.32
+                        metalness 0.45
+                      }
+                      geometry Cylinder {
+                        height 0.004
+                        radius 0.021
+                        subdivision 24
+                      }
+                    }
+                  ]
+                }
+              ]
+              name "titan_wheel1_solid"
+              boundingObject Cylinder {
+                height 0.032
+                radius 0.035
+              }
+              physics Physics {
+                density -1
+                mass 0.08
+              }
+              contactMaterial "wheel"
+            }
+          }
+        ]
+      }
+
+      # ── Wheel 2 — front right (120°) ──────────────────────────────────
+
+      Pose {
+        rotation 0 0 1 2.0944
+        children [
+          Pose {
+            translation -0.126 0 0.035
+            children [
+              Shape {
+                appearance PBRAppearance {
+                  baseColor 0.01 0.01 0.01
+                  roughness 0.8
+                  metalness 0
+                }
+                geometry Box {
+                  size 0.048 0.018 0.014
+                }
+              }
+            ]
+          }
+          HingeJoint {
+            jointParameters HingeJointParameters {
+              axis 1 0 0
+              anchor -0.170 0 0.035
+            }
+            device [
+              RotationalMotor {
+                name "wheel2"
+                maxVelocity 12
+                maxTorque 3.0
+              }
+            ]
+            endPoint Solid {
+              translation -0.170 0 0.035
+              rotation 0 1 0 1.5708
+              children [
+                Shape {
+                  appearance PBRAppearance {
+                    baseColor 0.02 0.02 0.02
+                    roughness 0.85
+                    metalness 0
+                  }
+                  geometry Cylinder {
+                    height 0.032
+                    radius 0.035
+                    subdivision 32
+                  }
+                }
+                Pose {
+                  translation 0 0 0.017
+                  children [
+                    Shape {
+                      appearance PBRAppearance {
+                        baseColor 0.10 0.25 0.65
+                        roughness 0.32
+                        metalness 0.45
+                      }
+                      geometry Cylinder {
+                        height 0.004
+                        radius 0.021
+                        subdivision 24
+                      }
+                    }
+                  ]
+                }
+                Pose {
+                  translation 0 0 -0.017
+                  children [
+                    Shape {
+                      appearance PBRAppearance {
+                        baseColor 0.10 0.25 0.65
+                        roughness 0.32
+                        metalness 0.45
+                      }
+                      geometry Cylinder {
+                        height 0.004
+                        radius 0.021
+                        subdivision 24
+                      }
+                    }
+                  ]
+                }
+              ]
+              name "titan_wheel2_solid"
+              boundingObject Cylinder {
+                height 0.032
+                radius 0.035
+              }
+              physics Physics {
+                density -1
+                mass 0.08
+              }
+              contactMaterial "wheel"
+            }
+          }
+        ]
+      }
+
+      # ── Wheel 3 — front left (240°) ───────────────────────────────────
+
+      Pose {
+        rotation 0 0 1 4.1888
+        children [
+          Pose {
+            translation -0.126 0 0.035
+            children [
+              Shape {
+                appearance PBRAppearance {
+                  baseColor 0.01 0.01 0.01
+                  roughness 0.8
+                  metalness 0
+                }
+                geometry Box {
+                  size 0.048 0.018 0.014
+                }
+              }
+            ]
+          }
+          HingeJoint {
+            jointParameters HingeJointParameters {
+              axis 1 0 0
+              anchor -0.170 0 0.035
+            }
+            device [
+              RotationalMotor {
+                name "wheel3"
+                maxVelocity 12
+                maxTorque 3.0
+              }
+            ]
+            endPoint Solid {
+              translation -0.170 0 0.035
+              rotation 0 1 0 1.5708
+              children [
+                Shape {
+                  appearance PBRAppearance {
+                    baseColor 0.02 0.02 0.02
+                    roughness 0.85
+                    metalness 0
+                  }
+                  geometry Cylinder {
+                    height 0.032
+                    radius 0.035
+                    subdivision 32
+                  }
+                }
+                Pose {
+                  translation 0 0 0.017
+                  children [
+                    Shape {
+                      appearance PBRAppearance {
+                        baseColor 0.10 0.25 0.65
+                        roughness 0.32
+                        metalness 0.45
+                      }
+                      geometry Cylinder {
+                        height 0.004
+                        radius 0.021
+                        subdivision 24
+                      }
+                    }
+                  ]
+                }
+                Pose {
+                  translation 0 0 -0.017
+                  children [
+                    Shape {
+                      appearance PBRAppearance {
+                        baseColor 0.10 0.25 0.65
+                        roughness 0.32
+                        metalness 0.45
+                      }
+                      geometry Cylinder {
+                        height 0.004
+                        radius 0.021
+                        subdivision 24
+                      }
+                    }
+                  ]
+                }
+              ]
+              name "titan_wheel3_solid"
+              boundingObject Cylinder {
+                height 0.032
+                radius 0.035
+              }
+              physics Physics {
+                density -1
+                mass 0.08
+              }
+              contactMaterial "wheel"
+            }
+          }
+        ]
+      }
+
+    ]
+
+    boundingObject USE TITAN_BODY
+
+    physics Physics {
+      density -1
+      mass 1.5
+      damping Damping {
+        linear 0.35
+        angular 0.45
+      }
+    }
+
+    contactMaterial "robot"
+
+    recognitionColors [
+      0.04 0.20 0.82
+    ]
+  }
+}

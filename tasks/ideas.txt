@@ -1,0 +1,181 @@
+Curr goal: robot can move boll/control it and score
+
+# --- general info summary of functions --- #
+
+# ---------------------- #
+# FILE shared_configs.py #
+# ---------------------- #
+
+holds shared info across all .py files shuch as
+robot configs,
+fiels,ball positions
+simulation configs: time, steps_per_action, max_episode_steps
+Inter-Process Communication
+
+also add_controllers_to_path and get_robot_config
+
+
+# ------------------------ #
+# FILE robot_controller.py #
+# ------------------------ #
+
+- Read the LiDAR, 360 values
+- Send sensor data to the supervisor, for now robot_id is between VIPER and Titan
+- Receive movement commands (from supervisor) velocity and rotation
+- Convert robot motion to wheel speeds
+- Drive the motors
+
+# ----------------- #
+# FILE lidar_cnn.py #
+# ----------------- #
+
+was onec a CNN to reduce lidar dim, it is now just the MLP
+- using just the lidar points alone was not very optimal so we need to 'encode' them
+
+
+# ------------------------- #
+# FILE soccer_supervisor.py #
+# ------------------------- #
+Supervisor + Gymnasium Environment
+
+---
+
+SoccerEnv is the central coordinator of training, bridging the RL agent, 
+Webots simulation, and robot controller while handling observations, 
+rewards, curriculum progression, resets, and episode termination.
+
+```bash
+RL Agent
+    │
+    ▼
+step(action)
+    │
+    ├─ Send action to robot controller
+    ├─ Advance Webots simulation
+    ├─ Receive LiDAR data
+    ├─ Read robot/ball state from Supervisor API
+    ├─ Build observation
+    ├─ Compute reward
+    ├─ Check terminal conditions
+    ▼
+(obs, reward, terminated, truncated, info)
+    │
+    ▼
+RL Agent
+```
+
+# ------------- #
+# FILE train.py #
+# ------------- #
+
+
+```bash
+soccer_supervisor.py
+        │
+        ▼
+   SoccerEnv
+        │
+        ▼
+train(env)
+        │
+        ├─ Select reward function
+        ├─ Build SB3 wrapper stack
+        ├─ Create PPO model
+        │
+        ▼
+Epoch Loop
+        │
+        ├─ Select robot type
+        ├─ Swap robot if needed
+        │
+        ├─ PPO learns for N steps
+        │      │
+        │      ├─ Request observation
+        │      ├─ Predict action
+        │      ├─ Execute action
+        │      ├─ Receive reward
+        │      └─ Update policy
+        │
+        ├─ Collect episode statistics
+        ├─ Save checkpoint
+        └─ Record metrics
+        │
+        ▼
+Save Final Model
+        │
+        ▼
+Generate Training Plots
+        │
+        ▼
+Training Complete
+```
+
+train uses env form soccer_supervisor and controles how it trains -> 
+    how many models, epochs, rewards,...
+
+# ------------------------- #
+# FILE test.py #
+# ------------------------- #
+
+
+
+
+
+--------------------------------------
+
+class CNNFeaturExtractor -> 
+- receives input from Robot’s lidar and encodes it to fewer features (basally just a CNN part to reduce feature input so robot does not consider each lidar point individually)
+
+class GeneralSupervisor -> 
+Uses from controller import Supervisor; simulation/world manager
+- has initial positions of abb and orobots (hw they start the match)
+- can see everything, given a robot’s id returns: ball {distance, vector}; goal {distance, vector}; (later also comrades and enemies list and position); 
+- controls time
+- it will later also be responsible for controlling how many robots are on the field;
+- reset_world (resets everything to start new simulation)
+- reset_positions (resets positions of ball and robots)
+- if ball or robots are off field brings them back;
+- if ball inside goal (restarts positions of ball & robots)
+- step_simulation
+
+class FootballEnvironment ->
+RL interface; Presents the simulation as an RL environment for PPO
+- starts new episodes
+- step(action)
+- sends action to robot
+- advances simulation
+- computes reward
+- returns observation
+
+class RobotState -> (internal robot state not much but keeps stuff clean)
+- Has access to lidar info(stores the currently observed np.array)
+- Previous action
+- current observations
+- …
+
+class RobotAgent or RLAgent ->  for each individual robot
+Where the robot ‘learns’
+- convert observations
+- choose actions
+- execute movement
+- interface with PPO
+
+- — FUNCS — 
+- get_observation (returns vector used by PPO)
+- apply_action (robots movement - where to?)
+- ball_colision
+- get_reward (will call and weigh different rewards)
+- reset_preference (every new simulation where we wanna reset knowledge)
+
+Model used to train (RL) -> PPO
+
+```bash
+GeneralSupervisor
+    ↓
+FootballEnvironment (Gym-style env)
+    ↓
+RobotAgent
+    ↓
+Policy Network (PPO)
+```
+
