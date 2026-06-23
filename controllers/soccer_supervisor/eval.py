@@ -110,7 +110,7 @@ def model_evaluate(
     for ep in range(n_episodes):
         #model = PPO.load(model_path, env=vec_env) # load model inside loop to reset any VecNormalize stats if used during training
 
-        obs, _  = vec_env.reset() # if model load inside, comment this line
+        obs = vec_env.reset()  # VecEnv.reset() retorna só obs (não (obs, info))
         ep_reward = 0.0
         ep_steps = 0
         done = False

@@ -23,6 +23,7 @@ Outputs (relative to this file's directory)
 
 from __future__ import annotations
 
+import csv
 import os
 
 import numpy as np
@@ -30,7 +31,7 @@ import matplotlib.pyplot as plt
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
@@ -66,6 +67,44 @@ _HERE     = os.path.dirname(os.path.abspath(__file__))
 _CKPT_DIR = os.path.join(_HERE, "checkpoints")
 _LOG_DIR  = os.path.join(_HERE, "logs")
 _PLOT_DIR = os.path.join(_HERE, "plots")
+EPISODE_CSV = os.path.join(_LOG_DIR, "episode_log.csv")   # consumido por monitor_*.py / plot_*.py
+
+
+# ── Logger CSV de episódios (alimenta monitor_viper/titan e plot_stages) ───────
+# Colunas: episode, timestep, reward, length, goal, stage, robot
+# "stage" é um índice global de epoch (viper: 0..N-1, titan: N..2N-1) para o
+# plot_stages colorir cada barra pelo robô correto.
+
+def _init_episode_csv(path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="") as f:
+        csv.writer(f).writerow(
+            ["episode", "timestep", "reward", "length", "goal", "stage", "robot"]
+        )
+
+
+class _EpisodeCSVCallback(BaseCallback):
+    """Anexa uma linha ao CSV ao fim de cada episódio (reward/length/goal)."""
+
+    def __init__(self, csv_path: str, stage: int, robot: str) -> None:
+        super().__init__(verbose=0)
+        self.csv_path = csv_path
+        self.stage = stage
+        self.robot = robot
+        self._ep = 0
+
+    def _on_step(self) -> bool:
+        for info in self.locals.get("infos", []):
+            ep = info.get("episode")
+            if ep is not None:                       # passo terminal (Monitor)
+                self._ep += 1
+                goal = 1 if info.get("goal_scored") else 0
+                with open(self.csv_path, "a", newline="") as f:
+                    csv.writer(f).writerow(
+                        [self._ep, self.num_timesteps, f"{ep['r']:.4f}",
+                         ep["l"], goal, self.stage, self.robot]
+                    )
+        return True
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -78,6 +117,7 @@ def train(env_raw) -> None:
     """
     for d in (_CKPT_DIR, _LOG_DIR, _PLOT_DIR):
         os.makedirs(d, exist_ok=True)
+    _init_episode_csv(EPISODE_CSV)   # zera o CSV de episódios (monitores/plots)
 
     # Train Viper first (already in world at startup)
     print("\n" + "═" * 60)
@@ -85,7 +125,9 @@ def train(env_raw) -> None:
     print("═" * 60)
     env_raw.set_robot_type("viper")
     env_raw._curriculum_step = 0   # reset curriculum for each robot
-    _train_robot(env_raw, "viper")
+    env_raw._phase = 0             # currículo por competência: fase inicial
+    env_raw._goal_history.clear()  # zera a janela de gols do robô
+    _train_robot(env_raw, "viper", stage0=0)
 
     # Swap to Titan and train
     print("\n" + "═" * 60)
@@ -93,15 +135,19 @@ def train(env_raw) -> None:
     print("═" * 60)
     env_raw.swap_robot("titan")
     env_raw._curriculum_step = 0   # reset curriculum for Titan
-    _train_robot(env_raw, "titan")
+    env_raw._phase = 0             # currículo por competência: fase inicial
+    env_raw._goal_history.clear()  # zera a janela de gols do robô
+    _train_robot(env_raw, "titan", stage0=N_EPOCHS)
 
     print("\n[train] All robots trained. Models saved to checkpoints/")
 
 
-def _train_robot(env_raw, robot_name: str) -> PPO:
+def _train_robot(env_raw, robot_name: str, stage0: int = 0) -> PPO:
     """
     Train one robot for N_EPOCHS epochs with its own fresh model and VecNormalize.
     Saves checkpoints and a final model for this robot.
+    `stage0` = índice global de epoch inicial (p/ o CSV: viper começa em 0,
+    titan em N_EPOCHS), usado só para colorir as barras do plot_stages.
     """
     ckpt_dir = _CKPT_DIR
     log_dir  = _LOG_DIR
@@ -132,11 +178,13 @@ def _train_robot(env_raw, robot_name: str) -> PPO:
               f"steps_so_far={model.num_timesteps}")
 
         stats_cb = _StatsCallback()
+        csv_cb   = _EpisodeCSVCallback(EPISODE_CSV, stage=stage0 + epoch,
+                                       robot=robot_name)
         try:
             model.learn(
                 total_timesteps     = STEPS_PER_EPOCH,
                 reset_num_timesteps = False,
-                callback            = stats_cb,
+                callback            = CallbackList([stats_cb, csv_cb]),
                 tb_log_name         = f"ppo_{robot_name}",
                 progress_bar        = True,
             )
