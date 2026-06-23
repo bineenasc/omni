@@ -181,38 +181,34 @@ class SoccerEnv(Supervisor, gym.Env):
         self._active_robot        : str   = "viper"
         self._step_count          : int   = 0
         self._still_steps         : int   = 0
-        self._post_stuck_steps    : int   = 0   # consecutive steps near a goal post without moving
+        self._post_stuck_steps    : int   = 0
         self._last_lidar          = np.ones(_N_LIDAR, dtype=np.float32)
         self._prev_dist_ball      : float = FIELD_DIAG
         self._prev_dist_ball_goal : float = FIELD_DIAG
         self._prev_robot_pos      : tuple = (0.0, 0.0)
-        self._prev_ball_z         : float = 0.0   # z da bola no passo anterior
+        self._prev_ball_z         : float = 0.0
         self._rng                         = np.random.default_rng()
 
-        # ── Curriculum de posições ─────────────────────────────────────────
-        # Contador global de passos — incrementado em step(), nunca resetado.
-        # Fase 1 (0–100k)  : bola perto do gol, robô atrás da bola
-        # Fase 2 (100k–300k): bola no campo de ataque, robô aleatório
-        # Fase 3 (300k+)   : completamente aleatório
+        # ── Curriculum por competência (8 fases) ───────────────────────────
+        # Fase 0: bola 0.05–0.20 m do gol   Fase 1: 0.20–0.50 m
+        # Fase 2: 0.50–1.00 m               Fase 3: 1.00–1.75 m
+        # Fase 4: 1.75–2.75 m               Fase 5: 2.75–4.00 m
+        # Fase 6: campo de ataque (z>0)      Fase 7: completamente aleatório
+        self._N_PHASES           : int   = 8
+        self._phase              : int   = 0
+        self._MAX_STEPS_BY_PHASE : list  = [350, 500, 650, 800, 950, 1100, 1200, 1250]
+        self._GOAL_WINDOW        : int   = 40   # episódios na janela de avaliação
+        self._PROMOTE_THRESH     : float = 0.50 # taxa de gols p/ promover
+        self._goal_history       : deque = deque(maxlen=40)
+
+        # Contador mantido p/ compatibilidade e diagnóstico em train.py
         self._curriculum_step : int = 0
 
-        # ── Curriculum adaptativo por goal_rate ────────────────────────────
-        # Avança de fase quando goal_rate >= THRESH nas últimas WINDOW tentativas
-        self._CURRICULUM_WINDOW   : int   = 10
-        self._CURRICULUM_THRESH   : float = 0.60
-        self._curriculum_outcomes : deque = deque(maxlen=10)
-
         # ── Bônus de meio campo (uma vez por episódio) ─────────────────────
-        # Dado quando a bola cruza de z<0 para z>0 (campo de ataque)
         self._midfield_bonus_given : bool = False
 
-        # ── Histórico de posições para penalidade de 10 segundos ──────────
-        # 10 s ÷ 40 ms/step = 250 steps
-        _WINDOW = 150   # 150 steps × 40 ms = 6 seconds
-        self._pos_history : deque = deque(maxlen=_WINDOW)
-        self._NO_PROGRESS_WINDOW  = _WINDOW          # passos na janela
-        self._NO_PROGRESS_THRESH  = 0.30             # metros de deslocamento líquido mínimo
-        self._NO_PROGRESS_PENALTY = -0.08            # reward por passo sem progresso
+        # ── Histórico de posições ──────────────────────────────────────────
+        self._pos_history : deque = deque(maxlen=150)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Gymnasium core
@@ -233,57 +229,56 @@ class SoccerEnv(Supervisor, gym.Env):
         self._midfield_bonus_given = False
         self._pos_history.clear()
 
-        # ── Curriculum de posições ─────────────────────────────────────────
-        # Fase 1a (0–30k)   : bola a 5–20 cm do gol, dentro das traves → gol quase garantido
-        # Fase 1b (30k–100k): bola a 0.5–1.5 m do gol, robô logo atrás
-        # Fase 2 (100k–300k): bola no campo de ataque (z>0), robô aleatório
-        # Fase 3 (300k+)    : completamente aleatório
-        cs = self._curriculum_step
+        # ── Curriculum por competência: spawn baseado na fase atual ────────
+        ph   = self._phase
         _gz  = FIELD["goal_z_attack"]    # 4.55
         _ghw = FIELD["goal_half_width"]  # 0.75
+        _HW  = FIELD["half_width"]       # 3.70
+        _HL  = FIELD["half_length"]      # 5.20
 
-        # Phase boundaries align with the epoch schedule (60k steps/epoch, 26 epochs):
-        #   Phase 1a: epochs 0–1   (1× Viper + 1× Titan)  →   0 – 120k steps
-        #   Phase 1b: epochs 2–3   (1× Viper + 1× Titan)  → 120k – 240k steps
-        #   Phase 2:  epochs 4–5   (1× Viper + 1× Titan)  → 240k – 360k steps
-        #   Phase 3:  epochs 6–25  (10× Viper + 10× Titan) →  360k+ steps
+        self._max_steps = self._MAX_STEPS_BY_PHASE[ph]
 
-        if cs < 400_000:
-            # Phase 1a — trivial: ball almost inside the goal.
-            # 400k steps (vs 120k) dá tempo suficiente para descobrir o +300.
-            bz = self._rng.uniform(_gz - 0.20, _gz - 0.05)    # 4.35 → 4.50
-            bx = self._rng.uniform(-_ghw * 0.70, _ghw * 0.70) # within posts
-            rz = float(bz) - self._rng.uniform(0.15, 0.40)
-            rx = float(bx) + self._rng.uniform(-0.15, 0.15)
+        # Helper: place robot just behind the ball (natural pushing posture)
+        def _behind(bx_, bz_, lo, hi, jit):
+            return (float(bx_) + self._rng.uniform(-jit, jit),
+                    float(bz_) - self._rng.uniform(lo, hi))
 
-        elif cs < 520_000:
-            # Phase 1b — easy: ball 0.5–1.5 m from goal, robot just behind ball
-            bz = self._rng.uniform(_gz - 1.50, _gz - 0.50)    # 3.05 → 4.05
+        if ph == 0:                                       # bola 0.05–0.20 m do gol
+            bz = self._rng.uniform(_gz - 0.20, _gz - 0.05)
+            bx = self._rng.uniform(-_ghw * 0.70, _ghw * 0.70)
+            rx, rz = _behind(bx, bz, 0.15, 0.40, 0.15)
+        elif ph == 1:                                     # 0.20–0.50 m
+            bz = self._rng.uniform(_gz - 0.50, _gz - 0.20)
             bx = self._rng.uniform(-_ghw, _ghw)
-            rz_max = float(bz) - 0.20
-            rz_min = max(float(bz) - 1.20, 0.0)
-            rz = self._rng.uniform(rz_min, rz_max)
-            rx = float(bx) + self._rng.uniform(-0.30, 0.30)
-
-        elif cs < 640_000:
-            # Phase 2 — medium: ball in the attack half (z > 0), robot anywhere
-            bz = self._rng.uniform(0.0, FIELD["half_length"] * 0.80)
-            bx = self._rng.uniform(-FIELD["half_width"] * 0.60,
-                                    FIELD["half_width"] * 0.60)
+            rx, rz = _behind(bx, bz, 0.15, 0.45, 0.20)
+        elif ph == 2:                                     # 0.50–1.00 m
+            bz = self._rng.uniform(_gz - 1.00, _gz - 0.50)
+            bx = self._rng.uniform(-_ghw, _ghw)
+            rx, rz = _behind(bx, bz, 0.20, 0.70, 0.30)
+        elif ph == 3:                                     # 1.00–1.75 m
+            bz = self._rng.uniform(_gz - 1.75, _gz - 1.00)
+            bx = self._rng.uniform(-_HW * 0.60, _HW * 0.60)
+            rx, rz = _behind(bx, bz, 0.25, 0.90, 0.35)
+        elif ph == 4:                                     # 1.75–2.75 m
+            bz = self._rng.uniform(_gz - 2.75, _gz - 1.75)
+            bx = self._rng.uniform(-_HW * 0.70, _HW * 0.70)
+            rx, rz = _behind(bx, bz, 0.30, 1.20, 0.45)
+        elif ph == 5:                                     # 2.75–4.00 m
+            bz = self._rng.uniform(_gz - 4.00, _gz - 2.75)
+            bx = self._rng.uniform(-_HW * 0.70, _HW * 0.70)
+            rx, rz = _behind(bx, bz, 0.40, 1.60, 0.60)
+            rz = max(rz, -_HL * 0.80)
+        elif ph == 6:                                     # campo de ataque (z > 0)
+            bz = self._rng.uniform(0.0, _HL * 0.80)
+            bx = self._rng.uniform(-_HW * 0.60, _HW * 0.60)
             rz_max = max(float(bz) - 0.20, -0.20)
-            rz = self._rng.uniform(-FIELD["half_length"] * 0.85, rz_max)
-            rx = self._rng.uniform(-FIELD["half_width"] * 0.70,
-                                    FIELD["half_width"] * 0.70)
-
-        else:
-            # Phase 3 — fully random: both robot and ball anywhere on the field
-            bx = self._rng.uniform(-FIELD["half_width"]  * 0.60,
-                                    FIELD["half_width"]  * 0.60)
-            bz = self._rng.uniform(-FIELD["half_length"] * 0.40,
-                                    FIELD["half_length"] * 0.40)
-            rx = self._rng.uniform(-FIELD["half_width"]  * 0.70,
-                                    FIELD["half_width"]  * 0.70)
-            rz = self._rng.uniform(-FIELD["half_length"] * 0.85, -0.5)
+            rz = self._rng.uniform(-_HL * 0.85, rz_max)
+            rx = self._rng.uniform(-_HW * 0.70, _HW * 0.70)
+        else:                                             # fase 7 — completamente aleatório
+            bx = self._rng.uniform(-_HW * 0.60, _HW * 0.60)
+            bz = self._rng.uniform(-_HL * 0.40, _HL * 0.40)
+            rx = self._rng.uniform(-_HW * 0.70, _HW * 0.70)
+            rz = self._rng.uniform(-_HL * 0.85, -0.5)
 
         self._ball_node.getField("translation").setSFVec3f(
             [float(bx), BALL["radius"], float(bz)]
@@ -291,23 +286,18 @@ class SoccerEnv(Supervisor, gym.Env):
         self._ball_node.setVelocity([0, 0, 0, 0, 0, 0])
         self._ball_node.resetPhysics()
 
-        # ── Randomise robot (own half: z < 0) ─────────────────────────────
+        # ── Place robot ────────────────────────────────────────────────────
         self._robot_node.getField("translation").setSFVec3f(
             [float(rx), 0.0, float(rz)]
         )
-        # Rotation: em Phase 1a o robô começa a olhar para o gol (+Z = ataque).
-        # Rx(-90°) sozinho faz o robô olhar para +X (lateral ao gol) — mau para aprender.
-        # Ry(π/2)·Rx(-90°) = axis-angle [-1/√3, 1/√3, 1/√3, 2π/3] → olha para +Z.
-        # Nas outras fases usa a rotação padrão (heading aleatório é aprendido pelo agente).
+        # Phases 0–1 (trivial): face the attack goal to bootstrap learning.
+        # Ry(π/2)·Rx(−90°) = axis-angle [−1/√3, 1/√3, 1/√3, 2π/3] → faces +Z.
         _INV_SQRT3 = 1.0 / math.sqrt(3)
-        cs_now = self._curriculum_step
-        if cs_now < 400_000:
-            # Face +Z (attack goal direction) — critical for Phase 1a discovery
+        if ph <= 1:
             self._robot_node.getField("rotation").setSFRotation(
                 [-_INV_SQRT3, _INV_SQRT3, _INV_SQRT3, 2.0 * math.pi / 3.0]
             )
         else:
-            # Fases mais difíceis: orientação padrão (agente aprende a rodar sozinho)
             self._robot_node.getField("rotation").setSFRotation(
                 [1.0, 0.0, 0.0, -math.pi / 2]
             )
@@ -414,25 +404,20 @@ class SoccerEnv(Supervisor, gym.Env):
         self._prev_ball_z     = ball_pos[1]
         self._curriculum_step += 1
 
-        # ── Curriculum adaptativo ──────────────────────────────────────────
-        # Regista TODOS os fins de episódio (terminated E truncated).
-        # Antes só contava terminated → se nunca havia gol/out, a deque
-        # nunca enchia e o curriculum adaptativo nunca activava.
+        # ── Curriculum por competência: promoção de fase ───────────────────
         if terminated or truncated:
-            self._curriculum_outcomes.append(1 if events["goal_scored"] else 0)
-            if len(self._curriculum_outcomes) == self._CURRICULUM_WINDOW:
-                goal_rate = sum(self._curriculum_outcomes) / self._CURRICULUM_WINDOW
-                _bounds = [0, 400_000, 520_000, 640_000]
-                _phase  = sum(1 for b in _bounds if self._curriculum_step >= b) - 1
-                _phase  = max(0, min(_phase, len(_bounds) - 1))
-                if _phase < len(_bounds) - 1 and goal_rate >= self._CURRICULUM_THRESH:
-                    _next = _bounds[_phase + 1]
-                    print(f"[Curriculum] Fase {_phase} → {_phase + 1} "
-                          f"(goal_rate={goal_rate:.0%}, step={self._curriculum_step} → {_next})")
-                    self._curriculum_step = _next
-                    self._curriculum_outcomes.clear()
+            self._goal_history.append(1 if events["goal_scored"] else 0)
+            if (len(self._goal_history) >= self._GOAL_WINDOW
+                    and self._phase < self._N_PHASES - 1):
+                goal_rate = sum(self._goal_history) / len(self._goal_history)
+                if goal_rate >= self._PROMOTE_THRESH:
+                    self._phase += 1
+                    self._goal_history.clear()
+                    print(f"[Curriculum] >>> PROMOVIDO para a fase "
+                          f"{self._phase}/{self._N_PHASES - 1} "
+                          f"(goal_rate={goal_rate:.0%}, robot={self._active_robot})")
 
-        info = {**events, "step": self._step_count}
+        info = {**events, "step": self._step_count, "phase": self._phase}
         return obs, float(reward), terminated, truncated, info
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -453,14 +438,12 @@ class SoccerEnv(Supervisor, gym.Env):
         dist_ball, dir_ball_w = _vec2d(robot_pos, ball_pos)
         dist_goal, dir_goal_w = _vec2d(robot_pos, goal_pos)
 
-        # Rotaciona direção do frame mundo → frame local do robô.
-        # Ry(+θ): local_x = cos θ·dx - sin θ·dz   (projeção no eixo body +X)
-        #         local_z = sin θ·dx + cos θ·dz   (projeção no eixo body +Z)
-        # Alinha local +X com body +X (direção do vx), garantindo que
-        # dir_ball_x > 0 ↔ bola na direção em que vx > 0 move o robô.
+        # Rotaciona direção do frame mundo → frame local do robô (Ry(−θ)).
+        # local_x =  cos θ·dx + sin θ·dz   → dir_bz > 0 significa bola à frente.
+        # local_z = −sin θ·dx + cos θ·dz
         def to_local(dx: float, dz: float) -> tuple[float, float]:
-            return (cos_h * dx - sin_h * dz,
-                     sin_h * dx + cos_h * dz)
+            return ( cos_h * dx + sin_h * dz,
+                    -sin_h * dx + cos_h * dz)
 
         dir_ball = to_local(dir_ball_w[0], dir_ball_w[1])
         dir_goal = to_local(dir_goal_w[0], dir_goal_w[1])
@@ -564,7 +547,7 @@ class SoccerEnv(Supervisor, gym.Env):
         if events["own_goal"]:
             return -200.0
         if events["ball_out"]:
-            return -100.0
+            return -25.0
 
         bx, bz   = ball_pos
         rx, rz   = robot_pos
@@ -575,27 +558,25 @@ class SoccerEnv(Supervisor, gym.Env):
         # ── 2. TIME PENALTY ──────────────────────────────────────────────────────
         reward -= 0.003
 
-        # ── 3. MIDFIELD BONUS (once per episode, só Phase 3) ─────────────────────
-        # Só faz sentido quando a bola pode começar no campo defensivo (cs >= 360k).
-        # Nas fases 1a/1b/2 a bola começa no campo de ataque → bonus nunca activa.
+        # ── 3. MIDFIELD BONUS (once per episode, só fase 7) ──────────────────────
+        # Só faz sentido quando a bola pode começar no campo defensivo (fase 7).
         if (not self._midfield_bonus_given
-                and self._curriculum_step >= 360_000
+                and self._phase >= 7
                 and self._prev_ball_z < 0.0 and bz >= 0.0):
             self._midfield_bonus_given = True
             reward += 1.0
 
         # ── 4. ROBOT → BALL PROGRESS ─────────────────────────────────────────────
-        # Approach reward ×2.0 — gradiente claro para aprender a navegar até à bola.
-        # Não domina o gol (+300 num step >> 2000 steps × max_approach_per_step).
-        reward += (self._prev_dist_ball - dist_ball) * 2.0
+        # ×4.0 — gradiente forte para aprender a navegar até à bola.
+        reward += (self._prev_dist_ball - dist_ball) * 4.0
 
         # ── 5. BALL → GOAL PROGRESS (ponto aberto mais próximo das traves) ────────
-        # Usa o ponto dentro das traves mais próximo de bx, não o centro fixo (x=0).
-        # Evita que o robô aprenda a empurrar a bola sempre para o centro da baliza.
+        # max(0, Δ): só recompensa avanço da bola; recuo não pune o agente.
+        # Sem esta trava o robô aprende a fugir da bola (recuo punido → evita toque).
         _hw = FIELD["goal_half_width"]
         _target_x = float(np.clip(bx, -_hw, _hw))
         dist_ball_goal = math.hypot(bx - _target_x, bz - GOAL_Z)
-        reward += (self._prev_dist_ball_goal - dist_ball_goal) * 15.0
+        reward += max(0.0, self._prev_dist_ball_goal - dist_ball_goal) * 15.0
 
         # ── 6. BALL VELOCITY TOWARD GOAL ─────────────────────────────────────────
         try:

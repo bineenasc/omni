@@ -41,26 +41,64 @@ Outputs  (relative to this file)
 
 from __future__ import annotations
 
-import os
 import copy
+import csv
+import os
 
 import numpy as np
 import matplotlib.pyplot as plt
-import torch
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # ── Directories ───────────────────────────────────────────────────────────────
-_HERE     = os.path.dirname(os.path.abspath(__file__))
-_CKPT_DIR = os.path.join(_HERE, "checkpoints")
-_LOG_DIR  = os.path.join(_HERE, "logs")
-_PLOT_DIR = os.path.join(_HERE, "plots")
+_HERE        = os.path.dirname(os.path.abspath(__file__))
+_CKPT_DIR    = os.path.join(_HERE, "checkpoints")
+_LOG_DIR     = os.path.join(_HERE, "logs")
+_PLOT_DIR    = os.path.join(_HERE, "plots")
+EPISODE_CSV  = os.path.join(_LOG_DIR, "episode_log_1v1.csv")
 
 # Path to 1v0 final models (same project, soccer_supervisor folder)
 _1V0_DIR  = os.path.join(_HERE, "..", "soccer_supervisor", "checkpoints")
+
+
+# ── CSV episode logger ────────────────────────────────────────────────────────
+# Columns: episode, timestep, reward, length, goal, opp_goal, phase, robot
+
+def _init_episode_csv_1v1(path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="") as f:
+        csv.writer(f).writerow(
+            ["episode", "timestep", "reward", "length",
+             "goal", "opp_goal", "phase", "robot"]
+        )
+
+
+class _EpisodeCSVCallback1v1(BaseCallback):
+    """Appends one CSV row at the end of each episode during 1v1 training."""
+
+    def __init__(self, csv_path: str, phase: str, robot: str) -> None:
+        super().__init__(verbose=0)
+        self.csv_path = csv_path
+        self.phase    = phase
+        self.robot    = robot
+        self._ep      = 0
+
+    def _on_step(self) -> bool:
+        for info in self.locals.get("infos", []):
+            ep = info.get("episode")
+            if ep is not None:
+                self._ep += 1
+                goal     = 1 if info.get("goal_scored")  else 0
+                opp_goal = 1 if info.get("opp_goal")      else 0
+                with open(self.csv_path, "a", newline="") as f:
+                    csv.writer(f).writerow(
+                        [self._ep, self.num_timesteps, f"{ep['r']:.4f}",
+                         ep["l"], goal, opp_goal, self.phase, self.robot]
+                    )
+        return True
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 WARMUP_STEPS          = 60_000
@@ -104,10 +142,10 @@ def train_1v1(env_raw) -> None:
     """Full 1v1 training pipeline.  ``env_raw`` is a live SoccerEnv1v1 instance."""
     for d in (_CKPT_DIR, _LOG_DIR, _PLOT_DIR):
         os.makedirs(d, exist_ok=True)
+    _init_episode_csv_1v1(EPISODE_CSV)
 
     # ── Build VecEnv wrappers (shared; active robot is switched in env_raw) ───
-    # We create two independent wrapper stacks — one per robot — so that
-    # VecNormalize reward statistics are kept separate (same design as 1v0).
+    # Two independent wrapper stacks keep VecNormalize reward statistics separate.
     viper_vec, titan_vec = _make_vec_envs(env_raw)
 
     # ── Load and extend 1v0 weights to 30-D ───────────────────────────────────
@@ -131,12 +169,12 @@ def train_1v1(env_raw) -> None:
     print(_header("WARMUP  (Viper only — adapting to 30-D obs)"))
     env_raw.set_phase("warmup")
     env_raw.set_active_robot("viper")
-    viper_vec.venv.envs[0].env = env_raw  # unwrap monitor
 
-    stats = _learn(viper_model, viper_vec, WARMUP_STEPS, "ppo_viper_warmup")
+    stats = _learn(viper_model, viper_vec, WARMUP_STEPS, "ppo_viper_warmup",
+                   phase="warmup", robot="viper")
     _append_stats(stats, rewards_log["viper"], goals_log["viper"])
     viper_model.save(os.path.join(_CKPT_DIR, "warmup_viper"))
-    print(f"[Warmup] Done.  goal_rate={np.mean(stats.ep_goals):.1%}")
+    print(f"[Warmup] Done.  goal_rate={np.mean(stats.ep_goals):.1%}" if stats.ep_goals else "[Warmup] Done.")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # PHASE 1 — Viper only, Titan static, adaptive curriculum
@@ -147,13 +185,13 @@ def train_1v1(env_raw) -> None:
 
     for epoch in range(N_EPOCHS_PHASE1_MAX):
         print(f"\n[Phase1 | Viper] Epoch {epoch+1}/{N_EPOCHS_PHASE1_MAX}")
-        stats = _learn(viper_model, viper_vec, STEPS_PER_EPOCH, "ppo_viper_p1")
+        stats = _learn(viper_model, viper_vec, STEPS_PER_EPOCH, "ppo_viper_p1",
+                       phase="phase1", robot="viper")
         _append_stats(stats, rewards_log["viper"], goals_log["viper"])
         viper_model.save(os.path.join(_CKPT_DIR, f"phase1_epoch{epoch:02d}_viper"))
         gr = float(np.mean(stats.ep_goals)) if stats.ep_goals else 0.0
         print(f"  goal_rate={gr:.1%}")
 
-        # Check if the env's curriculum reported readiness
         if _curriculum_ready(env_raw):
             print(f"[Phase1] Viper goal_rate threshold met — advancing to Phase 2.")
             break
@@ -176,7 +214,8 @@ def train_1v1(env_raw) -> None:
         if not viper_phase2_done:
             env_raw.set_active_robot("viper")
             env_raw.set_opp_policy(None)    # scripted opponent
-            stats = _learn(viper_model, viper_vec, STEPS_PER_HALF_EPOCH, "ppo_viper_p2")
+            stats = _learn(viper_model, viper_vec, STEPS_PER_HALF_EPOCH, "ppo_viper_p2",
+                           phase="phase2", robot="viper")
             _append_stats(stats, rewards_log["viper"], goals_log["viper"])
             gr = float(np.mean(stats.ep_goals)) if stats.ep_goals else 0.0
             print(f"  [Viper] goal_rate={gr:.1%}")
@@ -187,10 +226,10 @@ def train_1v1(env_raw) -> None:
         # ── Titan's turn (Viper frozen checkpoint) ────────────────────────────
         if not titan_phase2_done:
             env_raw.set_active_robot("titan")
-            # Use Viper's current model as frozen opponent
             viper_snap = _snapshot_policy(viper_model)
             env_raw.set_opp_policy(viper_snap)
-            stats = _learn(titan_model, titan_vec, STEPS_PER_HALF_EPOCH, "ppo_titan_p2")
+            stats = _learn(titan_model, titan_vec, STEPS_PER_HALF_EPOCH, "ppo_titan_p2",
+                           phase="phase2", robot="titan")
             _append_stats(stats, rewards_log["titan"], goals_log["titan"])
             gr = float(np.mean(stats.ep_goals)) if stats.ep_goals else 0.0
             print(f"  [Titan] goal_rate={gr:.1%}")
@@ -222,19 +261,21 @@ def train_1v1(env_raw) -> None:
         # ── Viper's turn (vs frozen Titan snapshot from previous epoch) ────────
         env_raw.set_active_robot("viper")
         env_raw.set_opp_policy(titan_snap)
-        stats = _learn(viper_model, viper_vec, STEPS_PER_HALF_EPOCH, "ppo_viper_p3")
+        stats = _learn(viper_model, viper_vec, STEPS_PER_HALF_EPOCH, "ppo_viper_p3",
+                       phase="phase3", robot="viper")
         _append_stats(stats, rewards_log["viper"], goals_log["viper"])
         viper_model.save(os.path.join(_CKPT_DIR, f"phase3_epoch{epoch:02d}_viper"))
         viper_vec.save(os.path.join(_CKPT_DIR, f"phase3_epoch{epoch:02d}_viper_vecnorm.pkl"))
         print(f"  [Viper] goal_rate={float(np.mean(stats.ep_goals)):.1%}" if stats.ep_goals else "")
 
-        # Update Titan snapshot with Titan's model BEFORE Titan's turn
+        # Update Titan snapshot BEFORE Titan's turn
         titan_snap = _snapshot_policy(titan_model)
 
         # ── Titan's turn (vs frozen Viper snapshot from previous epoch) ────────
         env_raw.set_active_robot("titan")
         env_raw.set_opp_policy(viper_snap)
-        stats = _learn(titan_model, titan_vec, STEPS_PER_HALF_EPOCH, "ppo_titan_p3")
+        stats = _learn(titan_model, titan_vec, STEPS_PER_HALF_EPOCH, "ppo_titan_p3",
+                       phase="phase3", robot="titan")
         _append_stats(stats, rewards_log["titan"], goals_log["titan"])
         titan_model.save(os.path.join(_CKPT_DIR, f"phase3_epoch{epoch:02d}_titan"))
         titan_vec.save(os.path.join(_CKPT_DIR, f"phase3_epoch{epoch:02d}_titan_vecnorm.pkl"))
@@ -385,13 +426,21 @@ def _make_vec_envs(env_raw):
 # Single model.learn() wrapper
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _learn(model: PPO, vec_env, n_steps: int, tb_name: str) -> "_StatsCallback":
+def _learn(
+    model: PPO,
+    vec_env,
+    n_steps: int,
+    tb_name: str,
+    phase: str = "",
+    robot: str = "",
+) -> "_StatsCallback":
     stats_cb = _StatsCallback()
+    csv_cb   = _EpisodeCSVCallback1v1(EPISODE_CSV, phase=phase, robot=robot)
     try:
         model.learn(
             total_timesteps     = n_steps,
             reset_num_timesteps = False,
-            callback            = stats_cb,
+            callback            = CallbackList([stats_cb, csv_cb]),
             tb_log_name         = tb_name,
             progress_bar        = True,
         )

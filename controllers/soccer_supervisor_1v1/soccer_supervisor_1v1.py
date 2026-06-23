@@ -616,7 +616,7 @@ class SoccerEnv1v1(Supervisor, gym.Env):
         if events["opp_goal"]:
             return -250.0
         if events["ball_out"]:
-            return -100.0
+            return -25.0
 
         bx, bz   = ball_pos
         rx, rz   = robot_pos
@@ -628,21 +628,26 @@ class SoccerEnv1v1(Supervisor, gym.Env):
         reward -= 0.003
 
         # ── 3. Midfield bonus (once per episode, phase3 only) ─────────────────
+        # The sign flip correctly handles Titan attacking -Z.
+        _sign = 1 if self._active_robot == "viper" else -1
         if (not self._midfield_bonus_given
                 and self._phase == "phase3"
-                and self._prev_ball_z * (1 if self._active_robot == "viper" else -1) < 0.0
-                and bz * (1 if self._active_robot == "viper" else -1) >= 0.0):
+                and self._prev_ball_z * _sign < 0.0
+                and bz * _sign >= 0.0):
             self._midfield_bonus_given = True
             reward += 1.0
 
         # ── 4. Robot → ball progress ──────────────────────────────────────────
-        reward += (self._prev_dist_ball - dist_ball) * 2.0
+        # ×4.0: strong gradient to navigate to the ball (matches bine-safecode).
+        reward += (self._prev_dist_ball - dist_ball) * 4.0
 
         # ── 5. Ball → goal progress ───────────────────────────────────────────
+        # max(0, Δ): only reward ball advancing; backward movement never punishes.
+        # Without this lock the agent learns to flee the ball (backward punished).
         _hw = FIELD["goal_half_width"]
         _target_x = float(np.clip(bx, -_hw, _hw))
         dist_ball_goal = math.hypot(bx - _target_x, bz - GOAL_Z)
-        reward += (self._prev_dist_ball_goal - dist_ball_goal) * 15.0
+        reward += max(0.0, self._prev_dist_ball_goal - dist_ball_goal) * 15.0
 
         # ── 6. Ball velocity toward goal ──────────────────────────────────────
         try:
@@ -1016,6 +1021,5 @@ if MODE == "train":
     from train_1v1 import train_1v1
     train_1v1(env)
 elif MODE == "eval":
-    # Placeholder — implement eval_1v1.py when needed
-    env.simulationSetMode(env.SIMULATION_MODE_REAL_TIME)
-    print("[soccer_supervisor_1v1] eval mode not yet implemented.")
+    from eval_1v1 import eval_1v1
+    eval_1v1(env)
