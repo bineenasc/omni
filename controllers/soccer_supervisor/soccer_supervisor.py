@@ -348,8 +348,10 @@ class SoccerEnv(Supervisor, gym.Env):
         obs      = self._get_obs()
 
         self._prev_dist_ball      = float(obs[1]) * FIELD_DIAG
+        _hw = FIELD["goal_half_width"]
+        _tx = float(np.clip(ball_pos[0], -_hw, _hw))
         self._prev_dist_ball_goal = math.hypot(
-            ball_pos[0], ball_pos[1] - FIELD["goal_z_attack"]
+            ball_pos[0] - _tx, ball_pos[1] - FIELD["goal_z_attack"]
         )
         self._prev_robot_pos = _flat(self._robot_node)
         self._prev_ball_z    = ball_pos[1]
@@ -403,8 +405,10 @@ class SoccerEnv(Supervisor, gym.Env):
 
         # ── Update prev state for next step ───────────────────────────────
         self._prev_dist_ball      = dist_ball
+        _hw2 = FIELD["goal_half_width"]
+        _tx2 = float(np.clip(ball_pos[0], -_hw2, _hw2))
         self._prev_dist_ball_goal = math.hypot(
-            ball_pos[0], ball_pos[1] - FIELD["goal_z_attack"]
+            ball_pos[0] - _tx2, ball_pos[1] - FIELD["goal_z_attack"]
         )
         self._prev_robot_pos  = robot_pos
         self._prev_ball_z     = ball_pos[1]
@@ -450,12 +454,13 @@ class SoccerEnv(Supervisor, gym.Env):
         dist_goal, dir_goal_w = _vec2d(robot_pos, goal_pos)
 
         # Rotaciona direção do frame mundo → frame local do robô.
-        # Ry(-θ): local_x =  cos θ·dx + sin θ·dz
-        #         local_z = -sin θ·dx + cos θ·dz
-        # Com isso: se a bola está à frente, dir_bz > 0 → vz > 0 (direto).
+        # Ry(+θ): local_x = cos θ·dx - sin θ·dz   (projeção no eixo body +X)
+        #         local_z = sin θ·dx + cos θ·dz   (projeção no eixo body +Z)
+        # Alinha local +X com body +X (direção do vx), garantindo que
+        # dir_ball_x > 0 ↔ bola na direção em que vx > 0 move o robô.
         def to_local(dx: float, dz: float) -> tuple[float, float]:
-            return ( cos_h * dx + sin_h * dz,
-                    -sin_h * dx + cos_h * dz)
+            return (cos_h * dx - sin_h * dz,
+                     sin_h * dx + cos_h * dz)
 
         dir_ball = to_local(dir_ball_w[0], dir_ball_w[1])
         dir_goal = to_local(dir_goal_w[0], dir_goal_w[1])
@@ -859,4 +864,26 @@ def _alignment_bonus(
     bx, bz = ball_pos
     if not (min(rz, goal_z) < bz < max(rz, goal_z)):
         return 0.0
-    l
+    # Lateral distance from ball to the line robot→goal_centre
+    dz = goal_z - rz
+    dx = 0.0 - rx  # goal centre is at x=0
+    length = math.hypot(dx, dz)
+    if length < 1e-6:
+        return 0.0
+    lateral = abs((bx - rx) * dz - (bz - rz) * dx) / length
+    return 0.05 if lateral < 0.30 else 0.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Entry point — Webots runs this file as the supervisor controller
+# ══════════════════════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    from train import train
+    from eval import model_evaluate
+
+    env = SoccerEnv()
+
+    if MODE == "train":
+        train(env)
+    else:
+        model_evaluate(env)
