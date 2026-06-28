@@ -1067,6 +1067,7 @@ if __name__ == "__main__":
         train(env)
     elif MODE == "eval":
         print("Starting evaluation...")
+        '''
         from eval import play_simulation #change if whant to check plots or something else
         play_simulation(
             model_path = "checkpoints/ppo_s4/final_model.zip",
@@ -1076,3 +1077,31 @@ if __name__ == "__main__":
             env_raw = env,
             curr_stage = 2,
         )
+        '''
+        from eval import eval, plot_eval_results, force_cenario
+        '''results = eval(
+            model_path = "checkpoints/ppo_s2/final_model.zip", #change to the wanted one
+            n_simulations = 2,
+            game_type = 0,  #chek Diogo's version and prob alter
+            curr_stage = 3,
+            deterministic = True,
+            env_raw = env,
+        )
+
+        plot_eval_results(
+            results = results,
+            robot_colours = {"viper": "#246484", "titan": "#78130B"}, #not the og colours but they are pretier
+            game_type = 0,
+            save_path = "plots/eval_results_ppo_s2.png", 
+        )'''
+
+        force_cenario(
+        model_path = "checkpoints/ppo_s2/final_model.zip",
+        max_simulations = 2, 
+        robot_type = "viper",
+        reference_metrics = ["reward"],#"goal_scored","ball_out", "own_goal"
+        save_file = "plays",
+        env_raw = env,
+        curr_stage = 3, #need to add later
+    )
+        
